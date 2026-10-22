@@ -45,9 +45,9 @@ FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL", "").strip()       # https://xxx-d
 STORE_FILE = os.getenv("STORE_FILE", "data.json")                # used only if Firebase is not set
 
 EMOJI = {
-    "fire": "🔥", "proxy": "🌐", "vpn": "🔐", "wallet": "💳", "orders": "📦",
+    "fire": "🔥", "proxy": "5336972142066047577", "vpn": "5337255927735163754", "wallet": "💳", "orders": "📦",
     "support": "💬", "notice": "📢", "back": "⬅️", "admin": "👑", "stats": "📊",
-    "add": "➕", "broadcast": "📣", "users": "👥", "deposit": "💰",
+    "add": "➕", "broadcast": "5424818078833715060", "users": "👥", "deposit": "💰",
     "settings": "⚙️", "ok": "✅", "no": "❌", "home": "🏠", "profile": "👤",
     "star": "⭐", "lock": "🔒", "stock": "🗃", "edit": "✏️", "trash": "🗑",
     "ban": "🚫", "bolt": "⚡", "gift": "🎁", "cart": "🛒",

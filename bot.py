@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Your Proxy Shop Bot  (v2, local JSON storage)
+Your Proxy Shop Bot  (v2, Firebase storage)
 -------------------------------------------
 * Bottom (reply-keyboard) menu for users  +  full Admin Panel as bottom menu for admins
 * Admin can change COLOR and CUSTOM EMOJI of every button (user side + admin side) from the panel
 * Categories / products / stock / deposits / users / broadcast / notice / settings - all via buttons
 * Pretty profile card, order invoice UI, paginated user list
-* Data saved in a local JSON file (STORE_FILE, default data.json)
+* Everything (emoji IDs, colors, users, products, orders...) saved in Firebase Firestore
+  (falls back to local data.json if Firebase is not configured)
 
-Requires: aiogram >= 3.25, python-dotenv
+Requires: aiogram >= 3.25, firebase-admin, python-dotenv
 """
 import asyncio
 import html
@@ -41,7 +42,14 @@ ADMIN_IDS = {int(x) for x in re.findall(r"\d+", os.getenv("ADMIN_IDS", ""))}
 BRAND = os.getenv("BRAND_NAME", "Your Proxy")
 CURRENCY = os.getenv("CURRENCY", "BDT")
 FORCE_CHANNEL = os.getenv("FORCE_CHANNEL", "").strip()
-STORE_FILE = os.getenv("STORE_FILE", "data.json")
+# ── Firebase (Firestore) service-account credentials ──
+# Option A: paste your service-account JSON between the braces below (keep this file PRIVATE, never upload to GitHub)
+FIREBASE_JSON = {
+}
+# Option B: env var FIREBASE_CRED_JSON (whole JSON) or a file path in FIREBASE_CRED
+FIREBASE_CRED = os.getenv("FIREBASE_CRED", "firebase.json")
+FIREBASE_CRED_JSON = os.getenv("FIREBASE_CRED_JSON", "").strip()
+STORE_FILE = os.getenv("STORE_FILE", "data.json")                  # fallback only
 
 # Every button: key -> (label, default color, fallback emoji, group)
 # color: "primary" (blue) | "success" (green) | "danger" (red) | None (default)
@@ -108,11 +116,12 @@ DEFAULT_PAYMENTS = (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("shop")
 
-# ═════════════ STORAGE (memory cache + atomic JSON file) ═════════════
+# ═════════════ STORAGE (memory cache + Firebase write-through) ═════════════
 D: dict[str, dict] = {k: {} for k in ("users", "cats", "products", "stock", "orders", "deposits", "settings", "seq")}
 SET = D["settings"]
 store_lock = asyncio.Lock()
 buy_lock = asyncio.Lock()
+fb_ref = None
 ADMIN_MODE: set[int] = set()     # admins currently showing the admin bottom menu
 
 
@@ -124,23 +133,64 @@ def _norm(v) -> dict:
     return {}
 
 
+def _fb_creds():
+    if FIREBASE_JSON.get("private_key"):
+        return FIREBASE_JSON
+    if FIREBASE_CRED_JSON:
+        return json.loads(FIREBASE_CRED_JSON)
+    if os.path.exists(FIREBASE_CRED):
+        with open(FIREBASE_CRED, encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+
+def _col(coll: str):
+    return fb_ref.collection(f"shop_{coll}")
+
+
 def init_store():
+    global fb_ref
     data = {}
-    if os.path.exists(STORE_FILE):
-        with open(STORE_FILE, encoding="utf-8") as f:
-            data = json.load(f)
+    creds = _fb_creds()
+    if creds:
+        import firebase_admin
+        from firebase_admin import credentials, firestore
+        firebase_admin.initialize_app(credentials.Certificate(creds))
+        fb_ref = firestore.client()
+        for coll in D:
+            part = {}
+            for doc in _col(coll).stream():
+                v = doc.to_dict() or {}
+                part[doc.id] = v["value"] if coll in ("settings", "seq") else v
+            data[coll] = part
+        log.info("Firebase Firestore connected")
     else:
-        log.warning("No %s yet - starting with an empty store", STORE_FILE)
+        log.warning("Firebase not configured -> using local file %s (data is lost on redeploy on Render!)", STORE_FILE)
+        if os.path.exists(STORE_FILE):
+            with open(STORE_FILE, encoding="utf-8") as f:
+                data = json.load(f)
     for coll in D:
         D[coll].clear()
         D[coll].update(_norm(data.get(coll)))
 
 
 def _persist(coll: str, keys: tuple):
-    tmp = STORE_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(D, f, ensure_ascii=False)
-    os.replace(tmp, STORE_FILE)          # atomic: file never ends up half-written
+    if fb_ref:
+        col = _col(coll)
+        for i in range(0, len(keys), 400):
+            batch = fb_ref.batch()
+            for k in keys[i:i + 400]:
+                val = D[coll].get(k)
+                if val is None:
+                    batch.delete(col.document(k))
+                else:
+                    batch.set(col.document(k), {"value": val} if coll in ("settings", "seq") else val)
+            batch.commit()
+    else:
+        tmp = STORE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(D, f, ensure_ascii=False)
+        os.replace(tmp, STORE_FILE)
 
 
 async def put(coll: str, *keys):

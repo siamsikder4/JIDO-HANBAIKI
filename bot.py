@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Your Proxy Shop Bot  (Firebase edition, v2)
+Your Proxy Shop Bot  (v2, local JSON storage)
 -------------------------------------------
 * Bottom (reply-keyboard) menu for users  +  full Admin Panel as bottom menu for admins
 * Admin can change COLOR and CUSTOM EMOJI of every button (user side + admin side) from the panel
 * Categories / products / stock / deposits / users / broadcast / notice / settings - all via buttons
 * Pretty profile card, order invoice UI, paginated user list
-* Firebase Realtime DB (falls back to local data.json)
+* Data saved in a local JSON file (STORE_FILE, default data.json)
 
-Requires: aiogram >= 3.25, firebase-admin, python-dotenv
+Requires: aiogram >= 3.25, python-dotenv
 """
 import asyncio
 import html
@@ -41,8 +41,6 @@ ADMIN_IDS = {int(x) for x in re.findall(r"\d+", os.getenv("ADMIN_IDS", ""))}
 BRAND = os.getenv("BRAND_NAME", "Your Proxy")
 CURRENCY = os.getenv("CURRENCY", "BDT")
 FORCE_CHANNEL = os.getenv("FORCE_CHANNEL", "").strip()
-FIREBASE_CRED = os.getenv("FIREBASE_CRED", "firebase.json")
-FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL", "").strip()
 STORE_FILE = os.getenv("STORE_FILE", "data.json")
 
 # Every button: key -> (label, default color, fallback emoji, group)
@@ -110,10 +108,9 @@ DEFAULT_PAYMENTS = (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("shop")
 
-# ═════════════ STORAGE (memory cache + Firebase write-through) ═════════════
+# ═════════════ STORAGE (memory cache + atomic JSON file) ═════════════
 D: dict[str, dict] = {k: {} for k in ("users", "cats", "products", "stock", "orders", "deposits", "settings", "seq")}
 SET = D["settings"]
-fb_ref = None
 store_lock = asyncio.Lock()
 buy_lock = asyncio.Lock()
 ADMIN_MODE: set[int] = set()     # admins currently showing the admin bottom menu
@@ -128,31 +125,22 @@ def _norm(v) -> dict:
 
 
 def init_store():
-    global fb_ref
     data = {}
-    if FIREBASE_DB_URL:
-        import firebase_admin
-        from firebase_admin import credentials, db as fdb
-        firebase_admin.initialize_app(credentials.Certificate(FIREBASE_CRED), {"databaseURL": FIREBASE_DB_URL})
-        fb_ref = fdb.reference("/")
-        data = fb_ref.get() or {}
-        log.info("Firebase connected")
+    if os.path.exists(STORE_FILE):
+        with open(STORE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
     else:
-        log.warning("FIREBASE_DB_URL not set -> using local file %s", STORE_FILE)
-        if os.path.exists(STORE_FILE):
-            with open(STORE_FILE, encoding="utf-8") as f:
-                data = json.load(f)
+        log.warning("No %s yet - starting with an empty store", STORE_FILE)
     for coll in D:
         D[coll].clear()
         D[coll].update(_norm(data.get(coll)))
 
 
 def _persist(coll: str, keys: tuple):
-    if fb_ref:
-        fb_ref.child(coll).update({k: D[coll].get(k) for k in keys})
-    else:
-        with open(STORE_FILE, "w", encoding="utf-8") as f:
-            json.dump(D, f, ensure_ascii=False)
+    tmp = STORE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(D, f, ensure_ascii=False)
+    os.replace(tmp, STORE_FILE)          # atomic: file never ends up half-written
 
 
 async def put(coll: str, *keys):
@@ -1582,6 +1570,25 @@ async def emo_save(m: Message, state: FSMContext):
 
 
 # ═════════════ MAIN ═════════════
+async def start_health_server():
+    """Tiny web server so hosts that require an open PORT (e.g. Render web service) keep the bot alive."""
+    port = os.getenv("PORT")
+    if not port:
+        return
+    from aiohttp import web
+
+    async def ok(_):
+        return web.Response(text="Bot is running")
+
+    app = web.Application()
+    app.router.add_get("/", ok)
+    app.router.add_get("/health", ok)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", int(port)).start()
+    log.info("Health server on port %s", port)
+
+
 async def main():
     if not BOT_TOKEN:
         raise SystemExit("❌ BOT_TOKEN is missing. Put it in .env")
@@ -1589,6 +1596,7 @@ async def main():
         log.warning("ADMIN_IDS is empty - nobody can open the admin panel!")
     await asyncio.to_thread(init_store)
     await seed_cats()
+    await start_health_server()
 
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True))
     dp = Dispatcher(storage=MemoryStorage())

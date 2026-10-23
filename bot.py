@@ -45,19 +45,7 @@ FORCE_CHANNEL = os.getenv("FORCE_CHANNEL", "").strip()
 # ── Firebase (Firestore) service-account credentials ──
 # Option A: paste your service-account JSON between the braces below (keep this file PRIVATE, never upload to GitHub)
 FIREBASE_JSON = {
-  "type": "service_account",
-  "project_id": "jido-hanbaiki",
-  "private_key_id": "1398f1366541ad3783989819851bb86f28fbdbc8",
-  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDiO3ob/5IJ/FrI\nHSxVrsdR7pi+Td3D4DpCk+xnxyw5VVqTkAF3V4idQtXxkxFGOkaYCErre3C5o4Ky\n5H2MdMGkY29w0jb5QBmarEXD/hSyFQCKWq8F4c3f2FSAHZ4JV67ZYdtegdJUa2hE\ny2YhJqLLkJU0LcOO/KAD0KWXWBRTJNKx1YoNBmzR0uo4e5VHmdwnnnbwHjkUEq+V\nVn+dM3gqQIUEd7ZRHvrg7ERx3UBDkbm1M1cE0TMd95/47I5dMTeqs4XX7GWsdIpx\nOjQ5cScQ0K8ZXfJGt+KW5h8gxmo5QpMuenm8lpKc55STDlratmV3qk3SxRYLwGPh\nmhjR1WwZAgMBAAECggEACO9dLWOoxIryWW64iGpKnkBoiTSZVoIBvw0pVDh0NU/7\nD7KrcieTglWITl4W+7Fzxg+myNnjW/uanv7h/AUE/F1+gmPVDr9Su46EA1+CuP1W\nHADEopx2VXnNbZFt41PSmKySHc+OC25CDByF7DeCzLwpPmozy+8LkVcBYUK168oo\novCX+oG3pbEYIPRVdeAR0IG5khDiICCsM1Or2DHfisutoAOnhd8FJXDwUrm//i2f\nFA73CLd+5Fj8A0mqr4Ex/ZxZv3t9AiYLzXIlqk6R1XQHOwL1QELE4ll0fTq6yL9+\nOpRO9Pqu5TyILSI6QoGrRbwU4jlqydG4XlxQZ23xYQKBgQDy/IL/ONbpf8Nc6Z3P\n3mFkliZwTbt4I5EzF/EsOSVS1dg/zEprrfJsawJ5ws1ZHfiV04EXqLl7FkSEhVYP\nGIGPeb5T6wts8g++BteIcly+viHZcWdJdbXsk3vTMZRQrYD0+aSYvUdsAbwLerUT\n40mJNB2Wjw0/4w7xZVy2wY4XOQKBgQDuWUHilWlrEsm047UxIjRn1cIMN+VM0CKB\nmIU+CnbJiu5RSphG6eLPRWeoX2mi72M8qfjbCn5+a/m9AjOiE+0Qd6Pl0rIEmGo3\n4z0KHJVgXw8/YVoxRQUP5uwP21gHLUBHZhkkaKo3alTGUAEEIkUcUEXzbfg/Eozb\n5Xe484Ab4QKBgGglpxgxipwGcPwP/d4s2N2+JbeY+bNiu0eFCZAE5mR81/VwYK2K\nnw+tRiBeSJnb6MJ/JyO249lIEBIk/F/4BwAyFEvvwLPvhKPUVula6zmuUN/cZYLs\n+w7tn/NDmuiBlXZq0gvNhSFcFPduntJpZwlx1wTDR9CMR8lbwsNqbraxAoGBAJro\ng/uho+wlP9dDD2YplunNcdrDEVKFC4gy+pZB8sY2d4F5+9JK/FA+CYrSyDNPZq3s\nwoKKJYBA6QVAwxIZ5T+IoosiDvURoidEl01VGniSD7TfruDKvOmC6fW8V1ACxv4g\ni0Kwi8CMaSCiqqZnJ4epXG1EEc3cXpQkZVVdXOvBAoGAOwznD3RP9Aahp/7MhgIt\n6zGLq9yOsI1edsf99+V2ix6JeJL4SvXBQI4te+1o/KIyTr+YL7YJA8XVoCL+r283\nNzgT7K/jRi/4jUtvf6cW+rF1N3gbYDxSzoz5khU0i60p6sU/jEO+aOCb/qPiPdIt\nELef3fydICMkmdtIAc8RQf8=\n-----END PRIVATE KEY-----\n",
-  "client_email": "firebase-adminsdk-fbsvc@jido-hanbaiki.iam.gserviceaccount.com",
-  "client_id": "107828358965812594260",
-  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40jido-hanbaiki.iam.gserviceaccount.com",
-  "universe_domain": "googleapis.com"
 }
-
 # Option B: env var FIREBASE_CRED_JSON (whole JSON) or a file path in FIREBASE_CRED
 FIREBASE_CRED = os.getenv("FIREBASE_CRED", "firebase.json")
 FIREBASE_CRED_JSON = os.getenv("FIREBASE_CRED_JSON", "").strip()
@@ -149,10 +137,11 @@ def _fb_creds():
     if FIREBASE_JSON.get("private_key"):
         return FIREBASE_JSON
     if FIREBASE_CRED_JSON:
-        return json.loads(FIREBASE_CRED_JSON)
-    if os.path.exists(FIREBASE_CRED):
-        with open(FIREBASE_CRED, encoding="utf-8") as f:
-            return json.load(f)
+        return json.loads(FIREBASE_CRED_JSON, strict=False)
+    for path in (FIREBASE_CRED, "/etc/secrets/firebase.json", "/etc/secrets/" + os.path.basename(FIREBASE_CRED)):
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
     return None
 
 

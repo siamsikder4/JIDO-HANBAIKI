@@ -445,6 +445,12 @@ def home_text(uid: int) -> str:
     return t + "\n<i>Use the menu below</i> 👇"
 
 
+def desc_html(p) -> str:
+    """Descriptions saved by the admin keep formatting + custom emoji (stored as HTML)."""
+    d = p.get("description") or ""
+    return d if p.get("dhtml") else esc(d)
+
+
 def rank_of(spent: float) -> str:
     if spent >= 5000:
         return "💎 Diamond"
@@ -747,7 +753,7 @@ async def cb_product(c: CallbackQuery):
     p = product_row(int(c.data.split(":")[1]))
     if not p or not p["active"]:
         return await c.answer("Product not available.", show_alert=True)
-    t = (f"{E('stock')} <b>{esc(p['name'])}</b>\n\n{esc(p.get('description') or '')}\n\n"
+    t = (f"{E('stock')} <b>{esc(p['name'])}</b>\n\n{desc_html(p)}\n\n"
          f"{E('money')} <b>Price:</b> {money(p['price'])}\n{E('stock')} <b>In stock:</b> {p['stk']}\n"
          f"{E('bolt')} <b>Delivery:</b> Instant")
     rows = []
@@ -873,6 +879,8 @@ class AddStock(StatesGroup):
     lines = State()
 class EditPrice(StatesGroup):
     price = State()
+class EditDesc(StatesGroup):
+    text = State()
 class FindUser(StatesGroup):
     query = State()
 class Adjust(StatesGroup):
@@ -1042,12 +1050,12 @@ async def adm_addp_cat(c: CallbackQuery, state: FSMContext):
 async def addp_name(m: Message, state: FSMContext):
     await state.update_data(name=m.text.strip())
     await state.set_state(AddP.desc)
-    await m.answer("📝 Send the <b>description</b> (features, validity, region…)")
+    await m.answer("📝 Send the <b>description</b> (features, validity, region…)\n<i>Premium/custom emoji and bold/italic formatting are kept as you send them.</i>")
 
 
 @admin.message(StateFilter(AddP.desc))
 async def addp_desc(m: Message, state: FSMContext):
-    await state.update_data(desc=m.text.strip())
+    await state.update_data(desc=m.html_text.strip())
     await state.set_state(AddP.price)
     await m.answer(f"{E('money')} Send the <b>price</b> (number, in {CURRENCY})")
 
@@ -1061,7 +1069,7 @@ async def addp_price(m: Message, state: FSMContext):
     d = await state.get_data()
     pid = await nid("products")
     D["products"][str(pid)] = {"id": pid, "category": d["cat"], "name": d["name"], "description": d["desc"],
-                               "price": price, "active": 1, "emoji": ""}
+                               "price": price, "active": 1, "emoji": "", "dhtml": 1}
     await put("products", pid)
     await state.clear()
     await m.answer(f"{E('ok')} Product created!", reply_markup=kb(
@@ -1075,14 +1083,14 @@ async def render_admin_product(c: CallbackQuery, pid: int):
         return await c.answer("Not found", show_alert=True)
     sold = sum(1 for s in D["stock"].values() if int(s["pid"]) == pid and s["sold"])
     t = (f"{E('stock')} <b>#{p['id']} {esc(p['name'])}</b>\nCategory: <b>{esc(cat_name(p['category']))}</b>\n\n"
-         f"{esc(p.get('description') or '')}\n\nPrice: <b>{money(p['price'])}</b>\n"
+         f"{desc_html(p)}\n\nPrice: <b>{money(p['price'])}</b>\n"
          f"In stock: <b>{p['stk']}</b> · Sold: <b>{sold}</b>\n"
          f"Emoji: <code>{p.get('emoji') or 'none'}</code>\n"
          f"Status: {'🟢 Active' if p['active'] else '🔴 Hidden'}")
     await show(c, t, kb(
         [B("Add Stock", f"adm:stk:{pid}", "x_add", fb="🗃"), B("Edit Price", f"adm:ep:{pid}", "x_edit")],
-        [B("Set Emoji", f"adm:pem:{pid}", "x_edit", fb="⭐"),
-         B("Hide" if p["active"] else "Show", f"adm:tg:{pid}", "x_edit", fb="👁")],
+        [B("Edit Description", f"adm:ed:{pid}", "x_edit", fb="📝"), B("Set Emoji", f"adm:pem:{pid}", "x_edit", fb="⭐")],
+        [B("Hide" if p["active"] else "Show", f"adm:tg:{pid}", "x_edit", fb="👁")],
         [B("Delete", f"adm:del:{pid}", "x_no", fb="🗑")],
         [B("Back", "adm:pl:0", "x_nav")]))
 
@@ -1143,6 +1151,25 @@ async def ep_save(m: Message, state: FSMContext):
     await state.clear()
     await m.answer(f"{E('ok')} Price updated to <b>{money(price)}</b>",
                    reply_markup=kb([B("Back to product", f"adm:p:{d['pid']}", "x_nav")]))
+
+
+@admin.callback_query(F.data.startswith("adm:ed:"))
+async def adm_ed(c: CallbackQuery, state: FSMContext):
+    await state.set_state(EditDesc.text)
+    await state.update_data(pid=int(c.data.split(":")[2]))
+    await show(c, "📝 Send the <b>new description</b>.\n<i>Premium/custom emoji and formatting are kept.</i>",
+               kb([B("Cancel", "close", "x_no")]))
+
+
+@admin.message(StateFilter(EditDesc.text))
+async def ed_save(m: Message, state: FSMContext):
+    d = await state.get_data()
+    p = prod(d["pid"])
+    if p:
+        p["description"], p["dhtml"] = m.html_text.strip(), 1
+        await put("products", d["pid"])
+    await state.clear()
+    await m.answer(f"{E('ok')} Description updated.", reply_markup=kb([B("Back to product", f"adm:p:{d['pid']}", "x_nav")]))
 
 
 @admin.callback_query(F.data.startswith("adm:stk:"))

@@ -1,22 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-Your Proxy Shop Bot  (v3, Firebase storage)
--------------------------------------------
-NEW in v3
-* Auto deposit ONLY via Binance Pay API (Order ID is verified automatically, balance added instantly)
-* bKash / Nagad (any other method) -> admin verifies manually, user may attach an optional screenshot
-* Duplicate Transaction-ID check (+ duplicate screenshot check)
-* Low-stock alert (admins/sub-admins get a message when a product runs low)
-* Transaction history (user + admin per-user view)
-* Sales report (24h / 7d / 30d / all) + CSV export
-* Sub-admin roles with per-permission toggles
-* Targeted broadcast (buyers, non-buyers, has balance, active 7d, new 7d, custom IDs)
-* Stock import from .txt / .csv file (duplicates are skipped automatically)
-* Text anti-spam (flood + repeated text -> temporary mute)
-* Every new button / message emoji can be changed from Admin Panel -> Custom Emoji
+Your Proxy Shop Bot  (v3.1, Firebase storage)
+---------------------------------------------
+* Binance Pay API  -> Order ID verified automatically, balance added instantly
+* bKash / Nagad / any other method -> admin approves (optional screenshot)
+* Duplicate Transaction-ID + duplicate screenshot check
+* Low-stock alert, transaction history, sales report + CSV
+* Sub-admin roles, targeted broadcast, stock import (.txt/.csv)
+* Anti-spam, custom emoji / button colors from Admin Panel
 
-Env vars: BOT_TOKEN, ADMIN_IDS (owners), BRAND_NAME, CURRENCY, FORCE_CHANNEL,
-          BINANCE_API_KEY, BINANCE_API_SECRET  (read-only key with "Enable Reading" is enough)
+NEW in v3.1
+* Nicer deposit UI (method cards, step guide, rich admin card)
+* One shared balance lock (no race between purchase / deposit / approve)
+* Max 3 pending deposits per user
+* Admin Settings -> "Test Binance API" button (shows the exact API error)
+
+Env vars: BOT_TOKEN, ADMIN_IDS, BRAND_NAME, CURRENCY, FORCE_CHANNEL,
+          BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_HOST (optional),
+          FIREBASE_CRED_JSON (whole service-account JSON)  or  FIREBASE_CRED (file path)
 Requires: aiogram >= 3.25, firebase-admin, python-dotenv, aiohttp
 """
 import asyncio
@@ -55,11 +56,9 @@ ADMIN_IDS = {int(x) for x in re.findall(r"\d+", os.getenv("ADMIN_IDS", ""))}   #
 BRAND = os.getenv("BRAND_NAME", "Your Proxy")
 CURRENCY = os.getenv("CURRENCY", "BDT")
 FORCE_CHANNEL = os.getenv("FORCE_CHANNEL", "").strip()
-# ── Firebase (Firestore) service-account credentials ──
-# Option A: paste your service-account JSON between the braces below (keep this file PRIVATE, never upload to GitHub)
+# ── Firebase (Firestore) ──  (prefer env var FIREBASE_CRED_JSON; never upload keys to GitHub)
 FIREBASE_JSON = {
 }
-# Option B: env var FIREBASE_CRED_JSON (whole JSON) or a file path in FIREBASE_CRED
 FIREBASE_CRED = os.getenv("FIREBASE_CRED", "firebase.json")
 FIREBASE_CRED_JSON = os.getenv("FIREBASE_CRED_JSON", "").strip()
 STORE_FILE = os.getenv("STORE_FILE", "data.json")                  # fallback only
@@ -70,15 +69,15 @@ BINANCE_SECRET = os.getenv("BINANCE_API_SECRET", "").strip()
 BINANCE_HOST = os.getenv("BINANCE_HOST", "https://api.binance.com").rstrip("/")
 BINANCE_ON = bool(BINANCE_KEY and BINANCE_SECRET)
 STABLE = {"USDT", "USDC", "BUSD", "FDUSD"}          # currencies treated as 1 USD
+MAX_PENDING = 3                                      # pending manual deposits per user
 
 # ── Anti-spam ──
-SPAM_WINDOW = 6        # seconds
-SPAM_MAX = 8           # max events (messages + button taps) per window
-SPAM_REPEAT = 4        # same text this many times within 10s = spam
-SPAM_MUTE = 30         # seconds (multiplied by strikes, max 600)
+SPAM_WINDOW = 6
+SPAM_MAX = 8
+SPAM_REPEAT = 4
+SPAM_MUTE = 30
 
 # Every button: key -> (label, default color, fallback emoji, group)
-# color: "primary" (blue) | "success" (green) | "danger" (red) | None (default)
 BTN = {
     # user - bottom menu
     "buy": ("Buy Product", "success", "🛒", "user"),
@@ -136,18 +135,15 @@ USER_KEYS = ["buy", "my_profile", "deposit", "history", "code", "support", "admi
 ADMIN_KEYS = ["a_dash", "a_report", "a_users", "a_prod", "a_cat", "a_deps", "a_bc", "a_notice", "a_set",
               "a_subs", "a_style", "a_emoji", "a_exit"]
 
-# Sub-admin permissions
 PERMS = {
     "dash": "Dashboard & Reports", "users": "Users", "prod": "Products & Stock", "cat": "Categories",
     "deps": "Deposits", "bc": "Broadcast", "notice": "Notice", "set": "Settings",
 }
-# bottom-menu key -> permission ("owner" = owners only, "" = everyone staff)
 KEY_PERM = {
     "a_dash": "dash", "a_report": "dash", "a_users": "users", "a_prod": "prod", "a_cat": "cat",
     "a_deps": "deps", "a_bc": "bc", "a_notice": "notice", "a_set": "set",
     "a_subs": "owner", "a_style": "owner", "a_emoji": "owner", "a_exit": "",
 }
-# inline admin callback op ("adm:<op>:...") -> permission
 OP_PERM = {
     "stats": "dash", "rep": "dash", "repcsv": "dash", "low": "dash",
     "cats": "cat", "addc": "cat", "c": "cat", "crn": "cat", "cdel": "cat", "cem": "cat",
@@ -157,21 +153,20 @@ OP_PERM = {
     "ul": "users", "find": "users", "u": "users", "ban": "users", "uo": "users", "o": "users",
     "adj": "users", "ut": "users",
     "bca": "bc", "bcgo": "bc",
-    "set": "set", "tgl": "set", "sv": "set",
+    "set": "set", "tgl": "set", "sv": "set", "bint": "set",
     "sty": "owner", "stp": "owner", "sts": "owner", "emo": "owner", "emk": "owner",
     "subs": "owner", "sa": "owner", "saadd": "owner", "sap": "owner", "sadel": "owner", "sadelok": "owner",
 }
 
-# Emojis used inside message text (custom emoji can be set for each from admin panel)
 EMOJI = {
     "fire": "🔥", "ok": "✅", "no": "❌", "wallet": "💳", "profile": "👤", "lock": "🔒",
     "notice": "📢", "stock": "🗃", "orders": "📦", "cart": "🛒", "bolt": "⚡", "party": "🎉",
     "stats": "📊", "users": "👥", "ban": "🚫", "settings": "⚙️", "invoice": "🧾",
     "money": "💵", "date": "📅", "crown": "👑", "broadcast": "📣", "star": "⭐", "down": "⬇️",
-    # new in v3
     "report": "📈", "low": "⚠️", "target": "🎯", "shield": "🛡", "hist": "📜", "photo": "🖼",
     "pending": "⏳", "auto": "🤖", "spam": "🚨", "credit": "🟢", "debit": "🔴", "import": "📥",
     "id": "🆔", "rank": "🏅", "name": "📛", "link": "🔗", "binance": "🟡",
+    "bkash": "🌸", "nagad": "🟠", "manual": "👨‍💼",
 }
 STYLE_LABEL = {"primary": "🔵 Blue", "success": "🟢 Green", "danger": "🔴 Red", "none": "⚪ Default"}
 STYLE_MARK = {"primary": "🔵", "success": "🟢", "danger": "🔴", None: "⚪"}
@@ -190,11 +185,11 @@ D: dict[str, dict] = {k: {} for k in ("users", "cats", "products", "stock", "ord
                                       "txns", "subs", "settings", "seq")}
 SET = D["settings"]
 store_lock = asyncio.Lock()
-buy_lock = asyncio.Lock()
-dep_lock = asyncio.Lock()
+buy_lock = asyncio.Lock()     # ONE lock for every balance change (purchase, deposit, approve)
+dep_lock = buy_lock
 fb_ref = None
-ADMIN_MODE: set[int] = set()     # staff currently showing the admin bottom menu
-LOW_SENT: dict[int, int] = {}    # product id -> stock level when last alert was sent
+ADMIN_MODE: set[int] = set()
+LOW_SENT: dict[int, int] = {}
 
 
 def _norm(v) -> dict:
@@ -280,7 +275,6 @@ async def nid(name: str) -> int:
 
 
 async def nids(name: str, n: int) -> list[int]:
-    """Reserve n ids with ONE write (fast bulk import)."""
     start = int(D["seq"].get(name, 0))
     D["seq"][name] = start + n
     await put("seq", name)
@@ -298,7 +292,6 @@ async def del_setting(key: str):
 
 
 async def bump_menu():
-    """Force every user's bottom keyboard to refresh on their next message."""
     await set_setting("mv", str(int(time.time() * 1000)))
 
 
@@ -334,15 +327,16 @@ def is_staff(uid) -> bool:
 
 
 def can(uid, perm) -> bool:
-    if uid in ADMIN_IDS or not perm:
-        return uid in ADMIN_IDS or is_staff(uid) if not perm else True
+    if uid in ADMIN_IDS:
+        return True
+    if not perm:
+        return is_staff(uid)
     if perm == "owner":
         return False
     return perm in D["subs"].get(str(uid), {}).get("perms", [])
 
 
 def staff_ids(perm=None) -> set:
-    """Owners + sub-admins that hold `perm` (owners only if perm is None)."""
     ids = set(ADMIN_IDS)
     if perm:
         for k, s in D["subs"].items():
@@ -381,7 +375,7 @@ async def seed_cats():
         D["cats"][str(cid)] = {"id": cid, "name": name, "emoji": "", "fb": fb}
     await put("cats", *D["cats"].keys())
     low = {c["name"].lower(): c["id"] for c in D["cats"].values()}
-    for p in D["products"].values():            # migrate old string categories
+    for p in D["products"].values():
         if isinstance(p.get("category"), str) and p["category"].lower() in low:
             p["category"] = low[p["category"].lower()]
     await put("products", *D["products"].keys())
@@ -420,7 +414,6 @@ def bstyle(key):
 
 
 def B(text, cb=None, key=None, url=None, cid=None, fb=None, st=None) -> InlineKeyboardButton:
-    """Inline button. Color + custom emoji come from the admin-controlled registry `key`."""
     kw = {}
     style = st if st else (bstyle(key) if key else None)
     if style:
@@ -518,7 +511,6 @@ async def show(ev, text, markup=None):
 
 
 async def notify_admins(bot: Bot, text: str, markup=None, perm=None, photo=None):
-    """Send to owners + sub-admins holding `perm` (owners only when perm is None)."""
     for aid in staff_ids(perm):
         try:
             if photo:
@@ -530,7 +522,6 @@ async def notify_admins(bot: Bot, text: str, markup=None, perm=None, photo=None)
 
 
 async def stamp(c: CallbackQuery, extra: str):
-    """Append a status line to the notification (works for text AND photo messages)."""
     base = c.message.html_text or ""
     try:
         if c.message.photo:
@@ -549,6 +540,17 @@ def pay_methods() -> list[tuple[str, str]]:
             if n.strip():
                 out.append((n.strip(), d.strip()))
     return out
+
+
+def pay_icon(name: str) -> str:
+    n = name.lower()
+    if "bkash" in n:
+        return EMOJI["bkash"]
+    if "nagad" in n:
+        return EMOJI["nagad"]
+    if "binance" in n:
+        return EMOJI["binance"]
+    return "💳"
 
 
 def min_deposit() -> float:
@@ -572,7 +574,7 @@ def low_threshold() -> int:
         return 5
 
 
-TOGGLES = {"maintenance": "0", "antispam": "1", "auto_dep": "1"}   # setting -> default
+TOGGLES = {"maintenance": "0", "antispam": "1", "auto_dep": "1"}
 
 
 def flag(key: str) -> bool:
@@ -580,7 +582,6 @@ def flag(key: str) -> bool:
 
 
 def is_auto(method_name: str) -> bool:
-    """Only Binance Pay is auto-verified (needs API keys + toggle ON)."""
     return BINANCE_ON and flag("auto_dep") and "binance" in method_name.lower()
 
 
@@ -604,7 +605,6 @@ def home_text(uid: int) -> str:
 
 
 def desc_html(p) -> str:
-    """Descriptions saved by the admin keep formatting + custom emoji (stored as HTML)."""
     d = p.get("description") or ""
     return d if p.get("dhtml") else esc(d)
 
@@ -625,7 +625,6 @@ def trx_key(t: str) -> str:
 
 
 def trx_used(trx: str):
-    """A transaction id is 'used' if any pending/approved deposit already has it."""
     k = trx_key(trx)
     for d in D["deposits"].values():
         if d["status"] != "rejected" and trx_key(d.get("trx", "")) == k:
@@ -635,6 +634,10 @@ def trx_used(trx: str):
 
 def ss_used(uniq: str) -> bool:
     return any(d.get("ss_uid") == uniq and d["status"] != "rejected" for d in D["deposits"].values())
+
+
+def pending_count(uid: int) -> int:
+    return sum(1 for d in D["deposits"].values() if d["user_id"] == uid and d["status"] == "pending")
 
 
 # ── ledger ──
@@ -693,7 +696,6 @@ def low_list():
 
 
 async def check_low(bot: Bot, pid: int):
-    """Alert staff once when stock drops to the limit, again when it hits zero."""
     p = product_row(pid)
     if not p:
         return
@@ -709,24 +711,31 @@ async def check_low(bot: Bot, pid: int):
 
 
 # ── Binance Pay verification ──
+async def _bn_get(session, start: int, end: int, limit: int = 100):
+    qs = (f"startTimestamp={start}&endTimestamp={end}&limit={limit}"
+          f"&recvWindow=30000&timestamp={int(time.time() * 1000)}")
+    sig = hmac.new(BINANCE_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
+    async with session.get(f"{BINANCE_HOST}/sapi/v1/pay/transactions?{qs}&signature={sig}",
+                           headers={"X-MBX-APIKEY": BINANCE_KEY}) as r:
+        js = await r.json(content_type=None)
+        return r.status, js
+
+
+def _bn_ok(js) -> bool:
+    return isinstance(js, dict) and (js.get("success") is True or str(js.get("code")) == "000000")
+
+
 async def binance_find(order_id: str):
-    """Look the Order ID up in Binance Pay history. Returns ('ok', tx) | ('notfound', None) | ('error', None)."""
+    """Returns ('ok', tx) | ('notfound', None) | ('error', None)."""
     import aiohttp
     oid = order_id.strip().upper()
-    bounds = [0, 1, 3, 7, 15, 30]               # days back, searched newest first
+    bounds = [0, 1, 3, 7, 15, 30]
     now = int(time.time() * 1000)
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as s:
             for a, b in zip(bounds, bounds[1:]):
-                end, start = now - a * 86400000, now - b * 86400000
-                qs = (f"startTimestamp={start}&endTimestamp={end}&limit=100"
-                      f"&recvWindow=30000&timestamp={int(time.time() * 1000)}")
-                sig = hmac.new(BINANCE_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
-                async with s.get(f"{BINANCE_HOST}/sapi/v1/pay/transactions?{qs}&signature={sig}",
-                                 headers={"X-MBX-APIKEY": BINANCE_KEY}) as r:
-                    js = await r.json(content_type=None)
-                ok = isinstance(js, dict) and (js.get("success") is True or str(js.get("code")) == "000000")
-                if not ok:
+                _, js = await _bn_get(s, now - b * 86400000, now - a * 86400000)
+                if not _bn_ok(js):
                     log.warning("Binance API error: %s", js)
                     return "error", None
                 for tx in js.get("data") or []:
@@ -739,9 +748,23 @@ async def binance_find(order_id: str):
     return "notfound", None
 
 
+async def binance_test():
+    """Returns (ok: bool, message: str) for the admin 'Test Binance API' button."""
+    import aiohttp
+    now = int(time.time() * 1000)
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as s:
+            status, js = await _bn_get(s, now - 86400000, now, limit=5)
+    except Exception as e:
+        return False, f"Connection failed: {e}"
+    if _bn_ok(js):
+        n = len(js.get("data") or [])
+        return True, f"API works ✅ (HTTP {status}). Last 24h Pay transactions seen: {n}"
+    return False, f"HTTP {status}\n{json.dumps(js, ensure_ascii=False)[:400]}"
+
+
 # ═════════════ MIDDLEWARE ═════════════
 async def refresh_menu(event, u, row):
-    """If admin changed colors/emoji, push a fresh bottom keyboard to the user."""
     if not isinstance(event, Message):
         return
     mv = SET.get("mv", "0")
@@ -753,13 +776,11 @@ async def refresh_menu(event, u, row):
 
 
 class AntiSpam(BaseMiddleware):
-    """Flood + repeated-text protection. Staff are exempt."""
-
     def __init__(self):
         self.hits: dict[int, deque] = {}
         self.mute: dict[int, float] = {}
-        self.strikes: dict[int, tuple] = {}      # uid -> (count, last_time)
-        self.last: dict[int, tuple] = {}         # uid -> (text, count, first_time)
+        self.strikes: dict[int, tuple] = {}
+        self.last: dict[int, tuple] = {}
 
     async def __call__(self, handler, event, data):
         u = data.get("event_from_user")
@@ -807,7 +828,7 @@ class AntiSpam(BaseMiddleware):
             except Exception:
                 pass
             return
-        if len(self.hits) > 5000:                # keep memory small
+        if len(self.hits) > 5000:
             for k in [k for k, v in self.hits.items() if not v]:
                 self.hits.pop(k, None)
         return await handler(event, data)
@@ -844,8 +865,6 @@ class Guard(BaseMiddleware):
 
 
 class PermMW(BaseMiddleware):
-    """Blocks admin callbacks the sub-admin has no permission for."""
-
     async def __call__(self, handler, event, data):
         parts = (getattr(event, "data", "") or "").split(":")
         if len(parts) >= 2 and parts[0] == "adm":
@@ -960,13 +979,19 @@ async def screen_dep(ev):
     methods = pay_methods()
     if not methods:
         return await show(ev, "Deposits are currently unavailable.")
-    btns = [[B(n + (" (Auto)" if is_auto(n) else ""), f"depm:{i}", "pay")] for i, (n, _) in enumerate(methods)]
+    t = f"{E('money')} <b>Add Funds</b>\n{BAR}\n"
+    for n, _ in methods:
+        tag = f"{E('auto')} <i>Auto · instant</i>" if is_auto(n) else f"{E('manual')} <i>Admin verified</i>"
+        t += f"{pay_icon(n)} <b>{esc(n)}</b> — {tag}\n"
+    t += f"{BAR}\n{E('wallet')} <b>Your balance:</b> {money(get_user(ev.from_user.id)['balance'])}\n"
+    t += f"<i>Minimum deposit: {money(min_deposit())}</i>\n\nChoose a payment method 👇"
+    btns = [[B(n + (" · Auto ⚡" if is_auto(n) else ""), f"depm:{i}", "pay", fb=pay_icon(n))]
+            for i, (n, _) in enumerate(methods)]
     btns.append([B("Cancel", "close", "cancel")])
-    await show(ev, f"{E('money')} <b>Add Funds</b>\n\nChoose a payment method 👇\n"
-                   f"<i>(Minimum: {money(min_deposit())})</i>", kb(*btns))
+    await show(ev, t, kb(*btns))
 
 
-# ═════════════ MENU ROUTER (bottom buttons always win over FSM states) ═════════════
+# ═════════════ MENU ROUTER ═════════════
 menu = Router()
 STAFF = F.from_user.id.func(is_staff)
 
@@ -1193,19 +1218,26 @@ async def cb_depm(c: CallbackQuery, state: FSMContext):
     if is_auto(name):                                   # Binance Pay -> verified automatically
         await state.set_state(Dep.trx)
         await state.update_data(method=name, auto=True, tries=0)
-        await show(c, f"{E('binance')} <b>{esc(name)}</b>  <i>({E('auto')} auto verified)</i>\n\n"
-                      f"<code>{esc(details)}</code>\n\n"
-                      f"1️⃣ Send <b>USDT</b> to the above Binance Pay account.\n"
-                      f"2️⃣ Send the <b>Order ID</b> (Transaction ID) of your payment here.\n\n"
+        await show(c, f"{pay_icon(name)} <b>{esc(name)}</b>  {E('auto')} <i>Auto verified</i>\n{BAR}\n"
+                      f"{E('link')} <b>Pay ID / Account</b>\n<code>{esc(details)}</code>\n{BAR}\n"
+                      f"1️⃣ Send <b>USDT</b> to the account above via Binance Pay\n"
+                      f"2️⃣ Copy the <b>Order ID</b> of your payment\n"
+                      f"3️⃣ Paste it here 👇\n{BAR}\n"
                       f"{E('money')} Rate: <b>1 USDT = {money(usd_rate())}</b>\n"
-                      f"{E('bolt')} Balance is added instantly after verification.",
+                      f"{E('bolt')} <i>Balance is added instantly after verification.</i>",
                    kb([B("Cancel", "close", "cancel")]))
         return
     await state.set_state(Dep.amount)
     await state.update_data(method=name)
-    await show(c, f"{E('wallet')} <b>{esc(name)}</b>\n\n<code>{esc(details)}</code>\n\n"
-                  f"1️⃣ Send the money to the above account.\n"
-                  f"2️⃣ Now type the <b>amount</b> you sent\n<i>(Minimum: {money(min_deposit())})</i>",
+    await show(c, f"{pay_icon(name)} <b>{esc(name)}</b>  {E('manual')} <i>Admin verified</i>\n{BAR}\n"
+                  f"{E('link')} <b>Send money to</b>\n<code>{esc(details)}</code>\n{BAR}\n"
+                  f"1️⃣ Send the money to the number above\n"
+                  f"2️⃣ Type the <b>amount</b> you sent\n"
+                  f"3️⃣ Send your <b>Transaction ID</b>\n"
+                  f"4️⃣ Attach a screenshot <i>(optional)</i>\n{BAR}\n"
+                  f"{E('pending')} <i>Approval usually takes a few minutes.</i>\n"
+                  f"<i>Minimum: {money(min_deposit())}</i>\n\n"
+                  f"✍️ <b>Now type the amount you sent:</b>",
                kb([B("Cancel", "close", "cancel")]))
 
 
@@ -1214,12 +1246,13 @@ async def dep_amount(m: Message, state: FSMContext):
     try:
         amt = float((m.text or "").replace(",", "").strip())
     except ValueError:
-        return await m.answer("❗ Please send a valid number, e.g. <code>50</code>")
+        return await m.answer("❗ Please send a valid number, e.g. <code>500</code>")
     if amt < min_deposit():
         return await m.answer(f"❗ Minimum deposit is <b>{money(min_deposit())}</b>")
     await state.update_data(amount=amt)
     await state.set_state(Dep.trx)
-    await m.answer(f"{E('ok')} Amount: <b>{money(amt)}</b>\n\nNow send your <b>Transaction ID / reference</b>:",
+    await m.answer(f"{E('ok')} Amount: <b>{money(amt)}</b>\n\n"
+                   f"🧾 Now send your <b>Transaction ID</b> (TrxID):",
                    reply_markup=kb([B("Cancel", "close", "cancel")]))
 
 
@@ -1230,7 +1263,7 @@ async def auto_deposit(m: Message, state: FSMContext, d: dict, trx: str):
         await state.clear()
         await notify_admins(m.bot, f"{E('low')} <b>Binance verification failed</b> (API error) for user "
                                    f"<code>{m.from_user.id}</code>, Order ID <code>{esc(trx)}</code>. "
-                                   f"Check API keys / IP restriction / region.")
+                                   f"Open Settings → Test Binance API to see the exact error.", perm="set")
         return await wait.edit_text(f"{E('no')} Verification is temporarily unavailable.\n"
                                     "Please try again in a few minutes or contact support.")
     if st == "notfound":
@@ -1270,8 +1303,10 @@ async def auto_deposit(m: Message, state: FSMContext, d: dict, trx: str):
         await put("users", m.from_user.id)
         await log_txn(m.from_user.id, "deposit", credit, f"Binance auto · #{did}", bal=bal)
     await state.clear()
-    await wait.edit_text(f"{E('ok')} <b>Deposit successful!</b>\n\nReceived: <b>{amt:g} {esc(cur)}</b>\n"
-                         f"Credited: <b>{money(credit)}</b>\nNew balance: <b>{money(bal)}</b>",
+    await wait.edit_text(f"{E('ok')} <b>Deposit successful!</b>\n{BAR}\n"
+                         f"{E('binance')} Received: <b>{amt:g} {esc(cur)}</b>\n"
+                         f"{E('money')} Credited: <b>{money(credit)}</b>\n"
+                         f"{E('wallet')} New balance: <b>{money(bal)}</b>",
                          reply_markup=kb([B("Buy Product", "buy", "buy")]))
     await notify_admins(m.bot, f"{E('auto')} <b>Auto deposit #{did}</b>\nUser: <code>{m.from_user.id}</code> "
                                f"(@{esc(m.from_user.username or '-')})\n{amt:g} {esc(cur)} → <b>{money(credit)}</b>\n"
@@ -1288,12 +1323,16 @@ async def dep_trx(m: Message, state: FSMContext):
                               "Each ID can only be used once. Send a different one or /cancel")
     if d.get("auto"):
         return await auto_deposit(m, state, d, trx)
+    if pending_count(m.from_user.id) >= MAX_PENDING:
+        await state.clear()
+        return await m.answer(f"{E('pending')} You already have <b>{MAX_PENDING}</b> pending deposits.\n"
+                              "Please wait until they are approved.")
     await state.update_data(trx=trx)
     await state.set_state(Dep.ss)
     await m.answer(f"{E('photo')} <b>Payment screenshot</b> <i>(optional)</i>\n\n"
-                   "Send a screenshot of your payment to help us verify faster, or tap <b>Skip</b>.\n"
+                   "Send a screenshot of your payment to get approved faster, or tap <b>Skip</b>.\n"
                    "<i>Send it as a photo, not as a file.</i>",
-                   reply_markup=kb([B("Skip &amp; Submit".replace("&amp;", "&"), "depskip", "skip")],
+                   reply_markup=kb([B("Skip & Submit", "depskip", "skip")],
                                    [B("Cancel", "close", "cancel")]))
 
 
@@ -1312,16 +1351,26 @@ async def finish_manual(bot: Bot, user, chat_msg: Message, state: FSMContext, ss
                                    "ss": ss[0] if ss else "", "ss_uid": ss[1] if ss else ""}
         await put("deposits", did)
     await state.clear()
-    await chat_msg.answer(f"{E('ok')} <b>Deposit request submitted!</b>\n\nRequest: <b>#{did}</b>\n"
-                          f"Method: {esc(d['method'])}\nAmount: {money(d['amount'])}\n"
-                          f"Trx: <code>{esc(d['trx'])}</code>\n\n"
-                          f"{E('pending')} Our team will verify it shortly. You'll be notified once approved.")
+    await chat_msg.answer(f"{E('ok')} <b>Deposit request submitted!</b>\n{BAR}\n"
+                          f"{E('id')} Request: <b>#{did}</b>\n"
+                          f"{pay_icon(d['method'])} Method: <b>{esc(d['method'])}</b>\n"
+                          f"{E('money')} Amount: <b>{money(d['amount'])}</b>\n"
+                          f"🧾 Trx: <code>{esc(d['trx'])}</code>\n{BAR}\n"
+                          f"{E('pending')} <i>Our team will verify it shortly. You'll be notified once approved.</i>",
+                          reply_markup=kb([B("My Transactions", "txh:0", "history")]))
+    u = get_user(user.id) or {}
+    prev = sum(x["amount"] for x in D["deposits"].values() if x["user_id"] == user.id and x["status"] == "approved")
     await notify_admins(
-        bot, f"{E('money')} <b>New deposit #{did}</b>\nUser: <code>{user.id}</code> "
-             f"(@{esc(user.username or '-')})\nMethod: {esc(d['method'])}\n"
-             f"Amount: <b>{money(d['amount'])}</b>\nTrx: <code>{esc(d['trx'])}</code>\n"
-             f"Screenshot: {'yes' if ss else 'no'}",
-        kb([B("Approve", f"adm:dok:{did}", "x_ok"), B("Reject", f"adm:dno:{did}", "x_no")]),
+        bot, f"{E('money')} <b>New deposit #{did}</b>  {E('pending')}\n{BAR}\n"
+             f"{E('profile')} {esc(u.get('full_name') or '-')} · @{esc(user.username or '-')}\n"
+             f"{E('id')} <code>{user.id}</code> · {rank_of(u.get('spent', 0))}\n"
+             f"{E('wallet')} Balance: {money(u.get('balance', 0))} · Past deposits: {money(prev)}\n{BAR}\n"
+             f"{pay_icon(d['method'])} Method: <b>{esc(d['method'])}</b>\n"
+             f"{E('money')} Amount: <b>{money(d['amount'])}</b>\n"
+             f"🧾 Trx: <code>{esc(d['trx'])}</code>\n"
+             f"{E('photo')} Screenshot: {'yes ⬆️' if ss else 'no'}",
+        kb([B("Approve", f"adm:dok:{did}", "x_ok"), B("Reject", f"adm:dno:{did}", "x_no")],
+           [B("User", f"adm:u:{user.id}", "x_edit", fb="👤")]),
         perm="deps", photo=ss[0] if ss else None)
 
 
@@ -1501,7 +1550,7 @@ async def screen_acats(ev):
         n = sum(1 for p in D["products"].values() if str(p["category"]) == str(c["id"]))
         btns.append([B(f"{c['name']} · {n} products", f"adm:c:{c['id']}", "x_item", cid=c.get("emoji"), fb=c.get("fb", "📁"))])
     btns.append([B("Add Category", "adm:addc", "x_add")])
-    await show(ev, f"📁 <b>Categories</b>\n\nTap a category to edit it.", kb(*btns))
+    await show(ev, "📁 <b>Categories</b>\n\nTap a category to edit it.", kb(*btns))
 
 
 @admin.callback_query(F.data == "adm:cats")
@@ -1811,7 +1860,7 @@ async def screen_adeps(ev):
     btns = [[B(f"#{d['id']} · {money(d['amount'])} · {d['method']} · {d['user_id']}" + (" 🖼" if d.get("ss") else ""),
                f"adm:d:{d['id']}", "x_item", fb="⏳")] for d in rows]
     btns.append(hist)
-    await show(ev, f"{E('money')} <b>Pending Deposits</b>", kb(*btns))
+    await show(ev, f"{E('money')} <b>Pending Deposits</b>  <i>({len(rows)})</i>", kb(*btns))
 
 
 @admin.callback_query(F.data == "adm:deps")
@@ -1838,7 +1887,8 @@ async def adm_dep(c: CallbackQuery):
     d = D["deposits"].get(c.data.split(":")[2])
     if not d:
         return await c.answer("Not found", show_alert=True)
-    t = (f"{E('money')} <b>Deposit #{d['id']}</b>\nUser: <code>{d['user_id']}</code>\nMethod: {esc(d['method'])}\n"
+    t = (f"{E('money')} <b>Deposit #{d['id']}</b>\n{BAR}\nUser: <code>{d['user_id']}</code>\n"
+         f"Method: {pay_icon(d['method'])} {esc(d['method'])}\n"
          f"Amount: <b>{money(d['amount'])}</b>" + (f" ({esc(d['raw'])})" if d.get("raw") else "") + "\n"
          f"Trx: <code>{esc(d['trx'])}</code>\nStatus: <b>{d['status']}</b>"
          + (" · auto" if d.get("auto") else "") + f"\nDate: {fdate(d['created_at'])}")
@@ -1847,6 +1897,7 @@ async def adm_dep(c: CallbackQuery):
         rows.append([B("Approve", f"adm:dok:{d['id']}", "x_ok"), B("Reject", f"adm:dno:{d['id']}", "x_no")])
     if d.get("ss"):
         rows.append([B("View Screenshot", f"adm:dss:{d['id']}", "x_shot")])
+    rows.append([B("User", f"adm:u:{d['user_id']}", "x_edit", fb="👤")])
     rows.append([B("Back", "adm:deps", "x_nav")])
     await show(c, t, kb(*rows))
 
@@ -1882,8 +1933,9 @@ async def adm_dok(c: CallbackQuery):
     await c.answer("Approved ✅")
     try:
         await c.bot.send_message(
-            d["user_id"], f"{E('ok')} <b>Deposit Approved!</b>\nAmount: <b>{money(d['amount'])}</b>\n"
-                          f"New balance: <b>{money(bal if bal is not None else 0)}</b>",
+            d["user_id"], f"{E('ok')} <b>Deposit Approved!</b>\n{BAR}\n"
+                          f"{E('money')} Amount: <b>{money(d['amount'])}</b>\n"
+                          f"{E('wallet')} New balance: <b>{money(bal if bal is not None else 0)}</b>",
             reply_markup=kb([B("Buy Product", "buy", "buy")]))
     except Exception:
         pass
@@ -1907,7 +1959,7 @@ async def adm_dno(c: CallbackQuery):
         pass
 
 
-# ── Users (list + manage) ──
+# ── Users ──
 async def screen_users(ev, page=0):
     rows = sorted(D["users"].values(), key=lambda u: -u["joined_at"])
     items, page, pages = paginate(rows, page, 8)
@@ -2033,11 +2085,12 @@ async def adj_save(m: Message, state: FSMContext):
         return await m.answer("❗ Send a valid number.")
     d = await state.get_data()
     delta = amt if d["sign"] == "+" else -amt
-    u = get_user(d["uid"])
-    u["balance"] += delta
-    await put("users", d["uid"])
-    await log_txn(d["uid"], "admin_add" if delta >= 0 else "admin_deduct", delta,
-                  f"by {m.from_user.full_name}", bal=u["balance"])
+    async with buy_lock:
+        u = get_user(d["uid"])
+        u["balance"] += delta
+        await put("users", d["uid"])
+        await log_txn(d["uid"], "admin_add" if delta >= 0 else "admin_deduct", delta,
+                      f"by {m.from_user.full_name}", bal=u["balance"])
     await state.clear()
     t, mk = user_panel(d["uid"])
     await m.answer(f"{E('ok')} Balance updated.\n\n{t}", reply_markup=mk)
@@ -2174,8 +2227,9 @@ async def notice_save(m: Message, state: FSMContext):
 SETTING_PROMPTS = {
     "support": "Send the <b>support username</b> (e.g. <code>@MySupport</code>). Send <code>clear</code> to remove.",
     "payments": "Send payment methods - <b>one per line</b> as <code>Name|Details</code>:\n"
-                "<code>bKash|017XXXXXXXX (Send Money)\nBinance Pay|XXXXXXXX</code>\n"
-                "<i>Any method whose name contains \"binance\" is auto-verified (when API keys are set).</i>",
+                "<code>bKash|017XXXXXXXX (Send Money)\nNagad|017XXXXXXXX (Send Money)\nBinance Pay|XXXXXXXX</code>\n"
+                "<i>Any method whose name contains \"binance\" is auto-verified (when API keys are set). "
+                "bKash / Nagad / others → admin approval.</i>",
     "min_dep": f"Send the <b>minimum deposit</b> amount (number, {CURRENCY}).",
     "usd_rate": f"Send the <b>USDT → {CURRENCY} rate</b> (number). Used for Binance auto-deposit.",
     "low_stock": "Send the <b>low-stock limit</b> (number). Staff get an alert when a product has this many items or fewer.",
@@ -2206,10 +2260,24 @@ async def screen_settings(ev):
         [B("Payment Methods", "adm:sv:payments", "x_edit", fb="💳"), B("USDT Rate", "adm:sv:usd_rate", "x_edit", fb="💱")],
         [B("Low-Stock Limit", "adm:sv:low_stock", "x_edit", fb="⚠️")],
         [B("Code Text", "adm:sv:code_text", "x_edit", fb="🔑"), B("Code Link", "adm:sv:code_url", "x_edit", fb="🔗")],
+        [B("Test Binance API", "adm:bint", "x_refresh", fb="🟡")],
         [B(f"Auto Deposit: {onoff('auto_dep')}", "adm:tgl:auto_dep", None, fb="", st="success" if flag("auto_dep") else "danger"),
          B(f"Anti-Spam: {onoff('antispam')}", "adm:tgl:antispam", None, fb="", st="success" if flag("antispam") else "danger")],
         [B("Maintenance: ON" if flag("maintenance") else "Maintenance: OFF", "adm:tgl:maintenance", None, fb="🛠",
            st="danger" if flag("maintenance") else None)]))
+
+
+@admin.callback_query(F.data == "adm:bint")
+async def adm_bint(c: CallbackQuery):
+    if not BINANCE_ON:
+        return await c.answer("BINANCE_API_KEY / SECRET not set.", show_alert=True)
+    await c.answer("Testing…")
+    ok, msg = await binance_test()
+    await c.message.answer(f"{E('binance')} <b>Binance API test</b>\n{BAR}\n"
+                           f"{E('ok') if ok else E('no')} <code>{esc(msg)}</code>\n\n"
+                           + ("" if ok else "<i>Check: key has “Enable Reading”, IP restriction (use Unrestricted or "
+                                            "your server IP), and the server region is not blocked by Binance "
+                                            "(try BINANCE_HOST=https://api1.binance.com).</i>"))
 
 
 @admin.callback_query(F.data == "adm:set")
@@ -2342,229 +2410,4 @@ async def adm_sap(c: CallbackQuery):
     if not s or perm not in PERMS:
         return await c.answer("Not found", show_alert=True)
     perms = list(s.get("perms", []))
-    perms.remove(perm) if perm in perms else perms.append(perm)
-    s["perms"] = perms
-    await put("subs", uid)
-    t, mk = sub_panel(uid)
-    await show(c, t, mk)
-    try:   # refresh that person's admin keyboard
-        await c.bot.send_message(uid, f"{E('shield')} Your admin permissions were updated.",
-                                 reply_markup=menu_kb(uid))
-    except Exception:
-        pass
-
-
-@admin.callback_query(F.data.startswith("adm:sadel:"))
-async def adm_sadel(c: CallbackQuery):
-    uid = int(c.data.split(":")[2])
-    await show(c, "⚠️ <b>Remove this sub admin?</b>",
-               kb([B("Yes, remove", f"adm:sadelok:{uid}", "x_no"), B("No", f"adm:sa:{uid}", "x_ok")]))
-
-
-@admin.callback_query(F.data.startswith("adm:sadelok:"))
-async def adm_sadelok(c: CallbackQuery):
-    uid = int(c.data.split(":")[2])
-    D["subs"].pop(str(uid), None)
-    await put("subs", uid)
-    ADMIN_MODE.discard(uid)
-    await c.answer("Removed ✅")
-    await screen_subs(c)
-    try:
-        await c.bot.send_message(uid, "Your sub-admin access was removed.", reply_markup=user_menu_kb(uid))
-    except Exception:
-        pass
-
-
-# ── Button colors (user + admin buttons) ──
-async def screen_styles(ev, page=0):
-    keys = list(BTN)
-    items, page, pages = paginate(keys, page, 10)
-    btns = []
-    for k in items:
-        label, _, _, grp = BTN[k]
-        btns.append([B(f"{label}  [{'User' if grp == 'user' else 'Admin'}] {STYLE_MARK[bstyle(k)]}", f"adm:stp:{k}", k)])
-    nr = nav_row("adm:sty", page, pages)
-    if nr:
-        btns.append(nr)
-    await show(ev, f"🎨 <b>Button Colors</b>\n\nPick a button to change its color.\n"
-                   f"Buttons below already show their <b>current color</b>.\n"
-                   f"<i>Changes reach every user's menu automatically.</i>", kb(*btns))
-
-
-@admin.callback_query(F.data.startswith("adm:sty:"))
-async def adm_sty(c: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await screen_styles(c, int(c.data.split(":")[2]))
-
-
-@admin.callback_query(F.data.startswith("adm:stp:"))      # (was adm:stk: - clashed with "Add Stock")
-async def adm_stk_pick(c: CallbackQuery):
-    k = c.data.split(":")[2]
-    if k not in BTN:
-        return await c.answer("Unknown", show_alert=True)
-    cur = bstyle(k)
-    t = (f"🎨 <b>{BTN[k][0]}</b>\nCurrent: <b>{STYLE_LABEL.get(cur or 'none')}</b>\n\nChoose a new color:")
-    await show(c, t, kb(
-        [B("Blue", f"adm:sts:{k}:primary", st="primary", fb="🔵"), B("Green", f"adm:sts:{k}:success", st="success", fb="🟢")],
-        [B("Red", f"adm:sts:{k}:danger", st="danger", fb="🔴"), B("Default", f"adm:sts:{k}:none", fb="⚪")],
-        [B("Reset to original", f"adm:sts:{k}:reset", "x_edit", fb="♻️")],
-        [B("Back", "adm:sty:0", "x_nav")]))
-
-
-@admin.callback_query(F.data.startswith("adm:sts:"))
-async def adm_sts(c: CallbackQuery):
-    _, _, k, val = c.data.split(":")
-    if k not in BTN:
-        return await c.answer("Unknown", show_alert=True)
-    if val == "reset":
-        await del_setting(f"style:{k}")
-    else:
-        await set_setting(f"style:{k}", val)
-    await bump_menu()
-    await c.answer("Color saved ✅")
-    await c.message.answer("🔄 Menu refreshed", reply_markup=menu_kb(c.from_user.id))
-    await adm_stk_pick(c)
-
-
-# ── Custom emoji (all buttons + message icons — new ones appear here automatically) ──
-def emoji_slots():
-    s = [(k, BTN[k][0], BTN[k][2]) for k in BTN]
-    s += [(k, f"msg: {k}", v) for k, v in EMOJI.items()]
-    return s
-
-
-async def screen_emojis(ev, page=0):
-    items, page, pages = paginate(emoji_slots(), page, 12)
-    btns, row = [], []
-    for k, label, ch in items:
-        row.append(B(f"{label[:16]} {'✅' if emoji_id(k) else ''}", f"adm:emk:{k}", None, fb=ch))
-        if len(row) == 2:
-            btns.append(row)
-            row = []
-    if row:
-        btns.append(row)
-    nr = nav_row("adm:emo", page, pages)
-    if nr:
-        btns.append(nr)
-    await show(ev, f"{E('star')} <b>Custom Emoji</b>\n\nPick a slot, then <b>send one custom emoji</b> "
-                   "(from any Premium pack) - the bot reads its ID automatically. You can also send a numeric ID "
-                   "or <code>clear</code>.\n\n✅ = custom emoji set\n"
-                   "<i>Every button and message icon (including the new v3 ones) is listed here.\n"
-                   "Category &amp; product emojis: open them from Categories / Products.</i>", kb(*btns))
-
-
-@admin.callback_query(F.data.startswith("adm:emo:"))
-async def adm_emo(c: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await screen_emojis(c, int(c.data.split(":")[2]))
-
-
-async def ask_emoji(c: CallbackQuery, state: FSMContext, kind, ref, title, back):
-    await state.set_state(EmojiS.value)
-    await state.update_data(kind=kind, ref=ref, back=back)
-    await show(c, f"⭐ <b>{esc(title)}</b>\n\nSend a <b>custom emoji</b> now (or its numeric ID / <code>clear</code>).",
-               kb([B("Cancel", back, "x_no")]))
-
-
-@admin.callback_query(F.data.startswith("adm:emk:"))
-async def adm_emk(c: CallbackQuery, state: FSMContext):
-    k = c.data.split(":")[2]
-    await ask_emoji(c, state, "slot", k, f"{BTN[k][0] if k in BTN else k}  (current: {emoji_id(k) or 'none'})", "adm:emo:0")
-
-
-@admin.callback_query(F.data.startswith("adm:cem:"))
-async def adm_cem(c: CallbackQuery, state: FSMContext):
-    cid = c.data.split(":")[2]
-    await ask_emoji(c, state, "cat", cid, f"Category emoji: {cat_name(cid)}", f"adm:c:{cid}")
-
-
-@admin.callback_query(F.data.startswith("adm:pem:"))
-async def adm_pem(c: CallbackQuery, state: FSMContext):
-    pid = c.data.split(":")[2]
-    await ask_emoji(c, state, "prod", pid, f"Product emoji: {(prod(pid) or {}).get('name', '?')}", f"adm:p:{pid}")
-
-
-@admin.message(StateFilter(EmojiS.value))
-async def emo_save(m: Message, state: FSMContext):
-    d = await state.get_data()
-    kind, ref, back = d["kind"], d["ref"], d["back"]
-    cid = next((e.custom_emoji_id for e in (m.entities or []) if e.type == "custom_emoji"), None)
-    txt = (m.text or "").strip()
-    clear = txt.lower() == "clear"
-    if not clear and not cid and txt.isdigit():
-        cid = txt
-    if not clear and not cid:
-        return await m.answer("❗ I couldn't find a custom emoji. Send a <b>custom emoji</b> or a numeric ID.")
-    val = "" if clear else cid
-    if kind == "slot":
-        if not is_owner(m.from_user.id):
-            await state.clear()
-            return await m.answer("⛔ Owner only.")
-        await (del_setting(f"emoji:{ref}") if clear else set_setting(f"emoji:{ref}", val))
-        await bump_menu()
-    elif kind == "cat" and ref in D["cats"]:
-        D["cats"][ref]["emoji"] = val
-        await put("cats", ref)
-    elif kind == "prod" and prod(ref):
-        prod(ref)["emoji"] = val
-        await put("products", ref)
-    await state.clear()
-    await m.answer(f"{E('ok')} {'Cleared' if clear else 'Saved'}: <code>{val or '-'}</code>",
-                   reply_markup=menu_kb(m.from_user.id))
-    await m.answer("Continue:", reply_markup=kb([B("Back", back, "x_nav")]))
-
-
-# ═════════════ MAIN ═════════════
-async def start_health_server():
-    """Tiny web server so hosts that require an open PORT (e.g. Render web service) keep the bot alive."""
-    port = os.getenv("PORT")
-    if not port:
-        return
-    from aiohttp import web
-
-    async def ok(_):
-        return web.Response(text="Bot is running")
-
-    app = web.Application()
-    app.router.add_get("/", ok)
-    app.router.add_get("/health", ok)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", int(port)).start()
-    log.info("Health server on port %s", port)
-
-
-async def main():
-    if not BOT_TOKEN:
-        raise SystemExit("❌ BOT_TOKEN is missing. Put it in .env")
-    if not ADMIN_IDS:
-        log.warning("ADMIN_IDS is empty - nobody can open the admin panel!")
-    if not BINANCE_ON:
-        log.warning("BINANCE_API_KEY / BINANCE_API_SECRET not set -> Binance deposits need manual admin approval")
-    await asyncio.to_thread(init_store)
-    await seed_cats()
-    await start_health_server()
-
-    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True))
-    dp = Dispatcher(storage=MemoryStorage())
-    spam = AntiSpam()
-    dp.message.outer_middleware(spam)              # anti-spam first
-    dp.callback_query.outer_middleware(spam)
-    dp.message.outer_middleware(Guard())
-    dp.callback_query.outer_middleware(Guard())
-    dp.include_router(menu)      # bottom buttons first (they cancel any FSM state)
-    dp.include_router(admin)
-    dp.include_router(router)
-
-    await bot.set_my_commands([BotCommand(command="start", description="Open main menu"),
-                               BotCommand(command="cancel", description="Cancel current action")])
-    log.info("Bot started as @%s", (await bot.get_me()).username)
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    perms.remove(perm) if p

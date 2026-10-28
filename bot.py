@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Your Proxy Shop Bot  (v3.2, Firebase storage + Telegram Account Selling)
+Your Proxy Shop Bot  (v3.3  ·  New UI + Auto Login-Code delivery)
 ------------------------------------------------------------------------
 * Binance Pay API  -> Order ID verified automatically, balance added instantly
 * bKash / Nagad / any other method -> admin approves (optional screenshot)
@@ -8,18 +8,16 @@ Your Proxy Shop Bot  (v3.2, Firebase storage + Telegram Account Selling)
 * Low-stock alert, transaction history, sales report + CSV
 * Sub-admin roles, targeted broadcast, stock import (.txt/.csv)
 * Anti-spam, custom emoji / button colors from Admin Panel
+* Sell Telegram accounts (Telethon session kept inside the bot)
 
-NEW in v3.2  -  SELL TELEGRAM ACCOUNTS
-* Admin Panel -> "TG Accounts" -> Add Account:
-      phone  ->  login code  ->  (2FA password)  ->  price
-  The account is logged in INSIDE the bot (Telethon session saved in Firebase).
-  Country flag + country name are detected automatically from the phone number.
-* Users: bottom menu "Telegram Accounts" -> country (flag) -> number -> buy
-* After purchase the user gets:  NUMBER  +  TWO-STEP password
-  The user logs in on his own phone, then taps "Get Login Code" and the bot
-  reads the code from the logged-in session and shows it inside the bot.
-* "Login Done" button -> bot session is removed from the account (account becomes
-  100% the buyer's).
+NEW in v3.3
+* Whole UI redesigned: clean headers, key-value rows, quote blocks, code blocks,
+  consistent dividers on every screen (user + admin + "Others").
+* AUTO LOGIN CODE: buyer taps "Get Login Code" once ->
+  the bot WATCHES the account for up to 3 minutes and the moment Telegram sends
+  the OTP, the bot AUTOMATICALLY pushes it to the buyer (edit + new notification
+  message). No need to press the button again and again.
+* "Login Done" -> bot session is removed (account becomes 100% the buyer's).
 
 Env vars: BOT_TOKEN, ADMIN_IDS, BRAND_NAME, CURRENCY, FORCE_CHANNEL,
           BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_HOST (optional),
@@ -84,7 +82,9 @@ try:
 except ValueError:
     TG_API_ID = 0
 TG_API_HASH = os.getenv("TG_API_HASH", "").strip()
-TG_CODE_LIMIT = 40                                   # max "Get Login Code" presses per account
+TG_CODE_LIMIT = 40                                   # max delivered codes per account
+TG_WATCH_SECONDS = 180                               # how long the bot waits for the OTP after the button press
+TG_WATCH_STEP = 2.5                                  # polling interval while waiting
 
 # ── Anti-spam ──
 SPAM_WINDOW = 6
@@ -118,6 +118,7 @@ BTN = {
     "skip": ("Skip screenshot", "primary", "⏭", "user"),
     "tg_code": ("Get Login Code", "success", "📩", "user"),
     "tg_done": ("Login Done", "primary", "🔓", "user"),
+    "tg_stop": ("Stop Waiting", "danger", "⏹", "user"),
     # admin - bottom menu
     "a_dash": ("Dashboard", "primary", "📊", "admin"),
     "a_report": ("Sales Report", "primary", "📈", "admin"),
@@ -179,6 +180,7 @@ OP_PERM = {
     "subs": "owner", "sa": "owner", "saadd": "owner", "sap": "owner", "sadel": "owner", "sadelok": "owner",
 }
 
+# Every emoji used in texts. All of them can be replaced with a premium emoji from Admin → Custom Emoji.
 EMOJI = {
     "fire": "🔥", "ok": "✅", "no": "❌", "wallet": "💳", "profile": "👤", "lock": "🔒",
     "notice": "📢", "stock": "🗃", "orders": "📦", "cart": "🛒", "bolt": "⚡", "party": "🎉",
@@ -189,6 +191,7 @@ EMOJI = {
     "id": "🆔", "rank": "🏅", "name": "📛", "link": "🔗", "binance": "🟡",
     "bkash": "🌸", "nagad": "🟠", "manual": "👨‍💼",
     "phone": "📞", "globe": "🌍", "key": "🔐", "mail": "📩",
+    "clock": "🕒", "spark": "✨", "tag": "🏷", "radar": "📡", "gem": "💎", "home": "🏠",
 }
 STYLE_LABEL = {"primary": "🔵 Blue", "success": "🟢 Green", "danger": "🔴 Red", "none": "⚪ Default"}
 STYLE_MARK = {"primary": "🔵", "success": "🟢", "danger": "🔴", None: "⚪"}
@@ -405,7 +408,8 @@ async def seed_cats():
 
 # ═════════════ HELPERS / UI ═════════════
 esc = html.escape
-BAR = "━━━━━━━━━━━━━━━"
+BAR = "━━━━━━━━━━━━━━━━━━"
+DOT = "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
 
 
 def money(x) -> str:
@@ -426,6 +430,34 @@ def E(key: str) -> str:
     ch = EMOJI.get(key) or (BTN[key][2] if key in BTN else "•")
     cid = emoji_id(key)
     return f'<tg-emoji emoji-id="{cid}">{ch}</tg-emoji>' if cid else ch
+
+
+# ── typography blocks (one look for the whole bot) ──
+def hd(key: str, text: str, sub: str = "") -> str:
+    """Screen header:  ICON  TITLE / subtitle / divider."""
+    s = f"{E(key)}  <b>{text}</b>\n"
+    if sub:
+        s += f"<i>{sub}</i>\n"
+    return s + f"{BAR}\n"
+
+
+def kv(key: str, label: str, val) -> str:
+    """One key-value row."""
+    return f"{E(key)} <b>{label}</b>  ›  {val}\n"
+
+
+def sec(text: str) -> str:
+    """Small section title."""
+    return f"\n<b>▎{text}</b>\n"
+
+
+def quote(text: str, expand: bool = False) -> str:
+    return f"<blockquote{' expandable' if expand else ''}>{text}</blockquote>"
+
+
+def ft(text: str) -> str:
+    """Footer line."""
+    return f"{BAR}\n<i>{text}</i>"
 
 
 def bstyle(key):
@@ -476,7 +508,7 @@ def user_menu_kb(uid: int) -> ReplyKeyboardMarkup:
     if is_staff(uid):
         rows.append([RB("admin")])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True,
-                               input_field_placeholder="Choose an option 👇")
+                               input_field_placeholder="✨ Choose an option")
 
 
 def admin_menu_kb(uid: int) -> ReplyKeyboardMarkup:
@@ -484,7 +516,7 @@ def admin_menu_kb(uid: int) -> ReplyKeyboardMarkup:
     rows = [[RB(k) for k in keys[i:i + 2]] for i in range(0, len(keys), 2)]
     rows.append([RB("a_exit")])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True,
-                               input_field_placeholder="Admin Panel 👑")
+                               input_field_placeholder="👑 Admin Panel")
 
 
 def menu_kb(uid: int) -> ReplyKeyboardMarkup:
@@ -511,7 +543,7 @@ def nav_row(prefix, page, pages):
     r = []
     if page > 0:
         r.append(B("Prev", f"{prefix}:{page - 1}", "x_nav", fb="◀️"))
-    r.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="noop"))
+    r.append(InlineKeyboardButton(text=f"{page + 1} / {pages}", callback_data="noop"))
     if page < pages - 1:
         r.append(B("Next", f"{prefix}:{page + 1}", "x_nav", fb="▶️"))
     return r
@@ -617,13 +649,16 @@ async def joined(bot: Bot, uid: int) -> bool:
 
 def home_text(uid: int) -> str:
     u = get_user(uid)
-    t = (f"{E('fire')} <b>Welcome to {esc(BRAND)}</b>\n"
-         f"<i>Premium Proxy &amp; VPN · Telegram Accounts · Instant delivery · 24/7</i>\n\n"
-         f"{E('profile')} <b>ID:</b> <code>{uid}</code>\n"
-         f"{E('wallet')} <b>Balance:</b> {money(u['balance'])}\n")
+    t = (f"{E('fire')}  <b>Welcome to {esc(BRAND)}</b>\n"
+         f"<i>Premium Proxy · VPN · Telegram Accounts</i>\n"
+         f"<i>{EMOJI['bolt']} Instant delivery  ·  {EMOJI['shield']} Trusted  ·  {EMOJI['clock']} 24/7</i>\n{BAR}\n"
+         + kv("profile", "ID", f"<code>{uid}</code>")
+         + kv("wallet", "Balance", f"<b>{money(u['balance'])}</b>")
+         + kv("rank", "Rank", rank_of(u["spent"]))
+         + BAR + "\n")
     if SET.get("notice"):
-        t += f"\n{E('notice')} <b>Notice</b>\n{SET['notice']}\n"
-    return t + "\n<i>Use the menu below</i> 👇"
+        t += f"\n{E('notice')} <b>Notice</b>\n{quote(SET['notice'])}\n"
+    return t + "\n<i>Pick an option from the menu below</i> 👇"
 
 
 def desc_html(p) -> str:
@@ -731,14 +766,14 @@ def history_lines(uid):
         sign = "+" if amt >= 0 else "-"
         note = f" · {esc(x['note'])}" if x.get("note") else ""
         out.append((x["created_at"],
-                    f"{icon} <b>{sign}{money(abs(amt))}</b> · {TX_LABEL.get(x['type'], x['type'])}{note}\n"
-                    f"    <i>{fdate(x['created_at'])} · Balance {money(x['balance_after'])}</i>"))
+                    f"{icon} <b>{sign}{money(abs(amt))}</b>  ·  {TX_LABEL.get(x['type'], x['type'])}{note}\n"
+                    f"      <i>{E('clock')} {fdate(x['created_at'])}  ·  Bal {money(x['balance_after'])}</i>"))
     for d in D["deposits"].values():
         if d["user_id"] == uid and d["status"] in ("pending", "rejected"):
             icon = E("pending") if d["status"] == "pending" else E("no")
             out.append((d["created_at"],
-                        f"{icon} <b>{money(d['amount'])}</b> · Deposit #{d['id']} ({d['status'].title()})\n"
-                        f"    <i>{fdate(d['created_at'])} · {esc(d['method'])}</i>"))
+                        f"{icon} <b>{money(d['amount'])}</b>  ·  Deposit #{d['id']} <i>({d['status'].title()})</i>\n"
+                        f"      <i>{E('clock')} {fdate(d['created_at'])}  ·  {esc(d['method'])}</i>"))
     out.sort(key=lambda x: -x[0])
     return out
 
@@ -746,7 +781,7 @@ def history_lines(uid):
 async def screen_history(ev, uid, page=0, prefix="txh", back=None):
     items, page, pages = paginate(history_lines(uid), page, 8)
     body = "\n\n".join(l for _, l in items) if items else "<i>No transactions yet.</i>"
-    t = f"{E('hist')} <b>Transaction History</b>\n{BAR}\n{body}"
+    t = hd("hist", "Transaction History", "Latest activity first") + body
     rows = []
     nr = nav_row(prefix, page, pages)
     if nr:
@@ -774,8 +809,8 @@ async def check_low(bot: Bot, pid: int):
     if last is None or (p["stk"] == 0 and last > 0):
         LOW_SENT[pid] = p["stk"]
         head = "OUT OF STOCK" if p["stk"] == 0 else "Low stock"
-        await notify_admins(bot, f"{E('low')} <b>{head}</b>\n{esc(p['name'])} — <b>{p['stk']}</b> left "
-                                 f"(limit {low_threshold()})", perm="prod")
+        await notify_admins(bot, hd("low", head) + f"{esc(p['name'])} — <b>{p['stk']}</b> left "
+                                                    f"<i>(limit {low_threshold()})</i>", perm="prod")
 
 
 # ── Binance Pay verification ──
@@ -887,7 +922,7 @@ class AntiSpam(BaseMiddleware):
             dq.clear()
             self.last.pop(u.id, None)
             log.info("Spam mute: user %s for %ss (strike %s)", u.id, secs, cnt)
-            txt = f"🚨 <b>Spam detected.</b> Please wait <b>{secs}s</b> before using the bot again."
+            txt = (hd("spam", "Spam detected") + f"Please wait <b>{secs}s</b> before using the bot again.")
             try:
                 if isinstance(event, CallbackQuery):
                     await event.answer(f"🚨 Spam detected. Wait {secs}s", show_alert=True)
@@ -919,13 +954,15 @@ class Guard(BaseMiddleware):
             await msg.answer(text, reply_markup=markup)
 
         if row["banned"]:
-            return await deny(f"{E('ban')} <b>You are banned from using this bot.</b>")
+            return await deny(hd("ban", "Access denied") + "You are banned from using this bot.\n"
+                              "<i>If this is a mistake, contact support.</i>")
         if flag("maintenance"):
-            return await deny(f"{E('settings')} <b>Maintenance mode</b>\nWe'll be back shortly!")
+            return await deny(hd("settings", "Maintenance mode") + "We are upgrading the shop.\n<i>We'll be back shortly!</i>")
         if FORCE_CHANNEL and not (isinstance(event, CallbackQuery) and event.data == "chk"):
             if not await joined(data["bot"], u.id):
                 url = f"https://t.me/{FORCE_CHANNEL.lstrip('@')}"
-                return await deny(f"{E('lock')} <b>Please join our channel first</b>\nJoin, then tap <b>I've Joined</b>.",
+                return await deny(hd("lock", "Join our channel first", "One quick step to unlock the shop")
+                                  + "1️⃣ Tap <b>Join Channel</b>\n2️⃣ Come back and tap <b>I've Joined</b>",
                                   kb([B("Join Channel", url=url, key="join", fb="📢")],
                                      [B("I've Joined", "chk", "join")]))
         await refresh_menu(event, u, row)
@@ -945,7 +982,7 @@ class PermMW(BaseMiddleware):
 # ═════════════ USER SCREENS ═════════════
 async def screen_buy(ev):
     cats = sorted(D["cats"].values(), key=lambda c: c["id"])
-    t = f"{E('cart')} <b>Buy Products</b>\n\nSelect a category:"
+    t = hd("cart", "Shop", "Pick a category to browse products") + "Select a category 👇"
     if not cats:
         t += "\n\n<i>No categories yet.</i>"
     btns, row = [], []
@@ -967,13 +1004,13 @@ async def screen_cat(ev, cid):
         return await show(ev, "Category not found.")
     rows = sorted((product_row(p["id"]) for p in D["products"].values()
                    if str(p["category"]) == str(cid) and p.get("active")), key=lambda p: p["id"])
-    t = f"{E('cart')} <b>Category: {esc(c['name'])}</b>\n\n"
-    t += "Select a product:" if rows else "<i>No products available right now. Please check back soon.</i>"
+    t = hd("cart", esc(c["name"]), f"{len(rows)} product(s) available")
+    t += "Select a product 👇" if rows else "<i>No products available right now. Please check back soon.</i>"
     btns = []
     for p in rows:
-        label = f"{p['name']} ❯ {money(p['price'])}" if p["stk"] else f"{p['name']} ❯ Sold out"
+        label = f"{p['name']}  ❯  {money(p['price'])}" if p["stk"] else f"{p['name']}  ❯  Sold out"
         btns.append([B(label, f"p:{p['id']}", "item", cid=p.get("emoji"), fb=p.get("fb"))])
-    btns.append([B("Back to Categories", "buy", "back", fb="⬇️")])
+    btns.append([B("Back to Categories", "buy", "back", fb="⬅️")])
     await show(ev, t, kb(*btns))
 
 
@@ -983,16 +1020,16 @@ async def screen_profile(ev):
     n = sum(1 for o in D["orders"].values() if o["user_id"] == uid)
     dep = sum(d["amount"] for d in D["deposits"].values() if d["user_id"] == uid and d["status"] == "approved")
     un = f"@{esc(u['username'])}" if u.get("username") else "—"
-    t = (f"{E('profile')} <b>My Profile</b>\n{BAR}\n"
-         f"{E('id')} <b>ID:</b> <code>{uid}</code>\n"
-         f"{E('name')} <b>Name:</b> {esc(u.get('full_name') or '-')}\n"
-         f"{E('link')} <b>Username:</b> {un}\n{BAR}\n"
-         f"{E('wallet')} <b>Balance:</b> {money(u['balance'])}\n"
-         f"{E('cart')} <b>Total Spent:</b> {money(u['spent'])}\n"
-         f"{E('money')} <b>Total Deposited:</b> {money(dep)}\n"
-         f"{E('orders')} <b>Orders:</b> {n}\n{BAR}\n"
-         f"{E('rank')} <b>Rank:</b> {rank_of(u['spent'])}\n"
-         f"{E('date')} <b>Member since:</b> {fdate(u['joined_at'])}")
+    t = (hd("profile", "My Profile", f"{rank_of(u['spent'])} member")
+         + kv("id", "ID", f"<code>{uid}</code>")
+         + kv("name", "Name", esc(u.get("full_name") or "-"))
+         + kv("link", "Username", un)
+         + sec("Wallet")
+         + kv("wallet", "Balance", f"<b>{money(u['balance'])}</b>")
+         + kv("cart", "Total spent", money(u["spent"]))
+         + kv("money", "Total deposited", money(dep))
+         + kv("orders", "Orders", f"<b>{n}</b>")
+         + ft(f"Member since {fdate(u['joined_at'])}"))
     await show(ev, t, kb([B("My Orders", "ords:0", "my_orders"), B("Add Funds", "dep", "deposit")],
                          [B("Transactions", "txh:0", "history")]))
 
@@ -1001,14 +1038,14 @@ async def screen_orders(ev, page=0):
     uid = ev.from_user.id
     allo = sorted((o for o in D["orders"].values() if o["user_id"] == uid), key=lambda o: -o["id"])
     if not allo:
-        return await show(ev, f"{E('orders')} <b>My Orders</b>\n\n<i>You have no orders yet.</i>",
+        return await show(ev, hd("orders", "My Orders") + "<i>You have no orders yet.</i>",
                           kb([B("Buy Product", "buy", "buy")]))
     items, page, pages = paginate(allo, page, 8)
     btns = [[B(f"#{o['id']} · {o['product_name']} · {money(o['price'])}", f"o:{o['id']}", "order_btn")] for o in items]
     nr = nav_row("ords", page, pages)
     if nr:
         btns.append(nr)
-    await show(ev, f"{E('orders')} <b>My Orders</b>  <i>({len(allo)} total)</i>\nTap an order to open its invoice 👇", kb(*btns))
+    await show(ev, hd("orders", "My Orders", f"{len(allo)} total · tap one to open its invoice") + "Your latest orders 👇", kb(*btns))
 
 
 def invoice_text(o, head=None) -> str:
@@ -1016,30 +1053,30 @@ def invoice_text(o, head=None) -> str:
         return tg_invoice(o, head)
     u = get_user(o["user_id"]) or {}
     t = f"{head}\n\n" if head else ""
-    t += (f"{E('invoice')} <b>INVOICE #{o['id']}</b>\n{BAR}\n"
-          f"{E('date')} <b>Date:</b> {fdate(o['created_at'])}\n"
-          f"{E('profile')} <b>Customer:</b> {esc(u.get('full_name') or '-')} (<code>{o['user_id']}</code>)\n"
-          f"{E('stock')} <b>Product:</b> {esc(o['product_name'])}\n"
-          f"{E('money')} <b>Paid:</b> {money(o['price'])}\n")
+    t += (hd("invoice", f"INVOICE #{o['id']}", f"{fdate(o['created_at'])}")
+          + kv("profile", "Customer", f"{esc(u.get('full_name') or '-')} (<code>{o['user_id']}</code>)")
+          + kv("stock", "Product", f"<b>{esc(o['product_name'])}</b>")
+          + kv("money", "Paid", f"<b>{money(o['price'])}</b>"))
     if o.get("balance_after") is not None:
-        t += f"{E('wallet')} <b>Remaining Balance:</b> {money(o['balance_after'])}\n"
-    t += (f"{E('ok')} <b>Status:</b> Delivered\n{BAR}\n"
-          f"{E('down')} <b>Your Details:</b>\n<code>{esc(o['data'])}</code>\n{BAR}\n"
-          f"<i>Thank you for shopping with {esc(BRAND)}!</i>")
+        t += kv("wallet", "Balance left", money(o["balance_after"]))
+    t += kv("ok", "Status", "Delivered")
+    t += (f"{sec('Your details')}<pre>{esc(o['data'])}</pre>\n"
+          + ft(f"Thank you for shopping with {esc(BRAND)} {EMOJI['spark']}"))
     return t
 
 
 async def screen_support(ev):
     sup = SET.get("support", "").lstrip("@")
-    t = ("💬 <b>Our Support Team</b>\n\nFor any issues or inquiries, click the button below to contact support directly.")
+    t = (hd("notice", "Support Center", "We usually reply within minutes")
+         + "Have a problem with an order, a deposit or an account?\nTap the button below and message our team directly.")
     if sup:
         return await show(ev, t, kb([B("Contact Admin", url=f"https://t.me/{sup}", key="contact", fb="💬")]))
     await show(ev, t + "\n\n<i>Support contact has not been set yet.</i>")
 
 
 async def screen_code(ev):
-    t = SET.get("code_text") or ("🔑 <b>Get Code</b>\n\nOpen the code page below and enter your account to receive "
-                                  "your verification code.")
+    t = SET.get("code_text") or (hd("key", "Get Code", "Verification codes") +
+                                  "Open the code page below and enter your account to receive your verification code.")
     url = SET.get("code_url", "")
     if url and not url.startswith("http"):
         url = f"https://t.me/{url.lstrip('@')}"
@@ -1050,12 +1087,13 @@ async def screen_dep(ev):
     methods = pay_methods()
     if not methods:
         return await show(ev, "Deposits are currently unavailable.")
-    t = f"{E('money')} <b>Add Funds</b>\n{BAR}\n"
+    t = hd("money", "Add Funds", "Top up your wallet in seconds")
     for n, _ in methods:
-        tag = f"{E('auto')} <i>Auto · instant</i>" if is_auto(n) else f"{E('manual')} <i>Admin verified</i>"
-        t += f"{pay_icon(n)} <b>{esc(n)}</b> — {tag}\n"
-    t += f"{BAR}\n{E('wallet')} <b>Your balance:</b> {money(get_user(ev.from_user.id)['balance'])}\n"
-    t += f"<i>Minimum deposit: {money(min_deposit())}</i>\n\nChoose a payment method 👇"
+        tag = f"{E('auto')} Auto · instant" if is_auto(n) else f"{E('manual')} Admin verified"
+        t += f"{pay_icon(n)} <b>{esc(n)}</b>  ›  <i>{tag}</i>\n"
+    t += (f"{DOT}\n" + kv("wallet", "Your balance", f"<b>{money(get_user(ev.from_user.id)['balance'])}</b>")
+          + kv("low", "Minimum", money(min_deposit()))
+          + "\nChoose a payment method 👇")
     btns = [[B(n + (" · Auto ⚡" if is_auto(n) else ""), f"depm:{i}", "pay", fb=pay_icon(n))]
             for i, (n, _) in enumerate(methods)]
     btns.append([B("Cancel", "close", "cancel")])
@@ -1082,12 +1120,15 @@ async def cmd_cancel(m: Message, state: FSMContext):
     await m.answer(home_text(m.from_user.id), reply_markup=menu_kb(m.from_user.id))
 
 
+def admin_home_text() -> str:
+    return hd("crown", "Admin Panel", "Manage your store from the buttons below") + "<i>Everything is one tap away.</i>"
+
+
 @menu.message(Command("admin"), STAFF)
 async def cmd_admin(m: Message, state: FSMContext):
     await state.clear()
     ADMIN_MODE.add(m.from_user.id)
-    await m.answer(f"{E('crown')} <b>Admin Panel</b>\n<i>Use the bottom buttons to manage your store.</i>",
-                   reply_markup=admin_menu_kb(m.from_user.id))
+    await m.answer(admin_home_text(), reply_markup=admin_menu_kb(m.from_user.id))
 
 
 @menu.message(F.text.func(lambda t: menu_key(t) in USER_KEYS))
@@ -1110,8 +1151,7 @@ async def on_user_menu(m: Message, state: FSMContext):
         await screen_support(m)
     elif k == "admin" and is_staff(m.from_user.id):
         ADMIN_MODE.add(m.from_user.id)
-        await m.answer(f"{E('crown')} <b>Admin Panel</b>\n<i>Use the bottom buttons to manage your store.</i>",
-                       reply_markup=admin_menu_kb(m.from_user.id))
+        await m.answer(admin_home_text(), reply_markup=admin_menu_kb(m.from_user.id))
 
 
 @menu.message(F.text.func(lambda t: menu_key(t) in ADMIN_KEYS), STAFF)
@@ -1124,7 +1164,7 @@ async def on_admin_menu(m: Message, state: FSMContext):
         return await m.answer("⛔ You don't have permission for this.", reply_markup=admin_menu_kb(uid))
     if k == "a_exit":
         ADMIN_MODE.discard(uid)
-        await m.answer("🏠 Back to user menu.", reply_markup=user_menu_kb(uid))
+        await m.answer(hd("home", "User menu") + "<i>You are back in the customer view.</i>", reply_markup=user_menu_kb(uid))
     elif k == "a_dash":
         await screen_stats(m)
     elif k == "a_report":
@@ -1143,8 +1183,10 @@ async def on_admin_menu(m: Message, state: FSMContext):
         await screen_bc_audience(m)
     elif k == "a_notice":
         await state.set_state(NoticeS.text)
-        await m.answer(f"{E('notice')} <b>Notice Board</b>\n\nCurrent:\n{SET.get('notice') or '<i>(none)</i>'}\n\n"
-                       "Send the new notice (formatting &amp; custom emoji supported).\nSend <code>clear</code> to remove it.",
+        await m.answer(hd("notice", "Notice Board", "Shown on the home screen")
+                       + f"<b>Current</b>\n{quote(SET.get('notice') or '<i>(none)</i>')}\n"
+                       "Send the new notice <i>(formatting &amp; custom emoji supported)</i>.\n"
+                       "Send <code>clear</code> to remove it.",
                        reply_markup=kb([B("Cancel", "close", "x_no")]))
     elif k == "a_set":
         await screen_settings(m)
@@ -1220,9 +1262,12 @@ async def cb_product(c: CallbackQuery):
     p = product_row(int(c.data.split(":")[1]))
     if not p or not p["active"]:
         return await c.answer("Product not available.", show_alert=True)
-    t = (f"{E('stock')} <b>{esc(p['name'])}</b>\n\n{desc_html(p)}\n\n"
-         f"{E('money')} <b>Price:</b> {money(p['price'])}\n{E('stock')} <b>In stock:</b> {p['stk']}\n"
-         f"{E('bolt')} <b>Delivery:</b> Instant")
+    t = (hd("stock", esc(p["name"]), esc(cat_name(p["category"])))
+         + f"{quote(desc_html(p), expand=True)}\n"
+         + kv("tag", "Price", f"<b>{money(p['price'])}</b>")
+         + kv("stock", "In stock", f"<b>{p['stk']}</b>")
+         + kv("bolt", "Delivery", "Instant")
+         + BAR)
     rows = []
     if p["stk"]:
         rows.append([B("Buy Now", f"buy:{p['id']}", "buynow")])
@@ -1237,11 +1282,16 @@ async def cb_buy(c: CallbackQuery):
     if not p or not p["active"] or not p["stk"]:
         return await c.answer("Out of stock.", show_alert=True)
     if u["balance"] < p["price"]:
-        t = (f"{E('no')} <b>Insufficient balance</b>\n\nPrice: {money(p['price'])}\n"
-             f"Your balance: {money(u['balance'])}\n\nPlease add funds first.")
+        t = (hd("no", "Insufficient balance", "Top up to continue")
+             + kv("tag", "Price", money(p["price"]))
+             + kv("wallet", "Your balance", money(u["balance"]))
+             + kv("low", "Missing", f"<b>{money(p['price'] - u['balance'])}</b>"))
         return await show(c, t, kb([B("Add Funds", "dep", "deposit")], [B("Back", f"p:{p['id']}", "back")]))
-    t = (f"{E('cart')} <b>Confirm purchase</b>\n\nProduct: <b>{esc(p['name'])}</b>\nPrice: <b>{money(p['price'])}</b>\n"
-         f"Balance after: <b>{money(u['balance'] - p['price'])}</b>")
+    t = (hd("cart", "Confirm purchase", "Please review your order")
+         + kv("stock", "Product", f"<b>{esc(p['name'])}</b>")
+         + kv("tag", "Price", f"<b>{money(p['price'])}</b>")
+         + kv("wallet", "Balance after", f"<b>{money(u['balance'] - p['price'])}</b>")
+         + ft("Tap Confirm to pay from your wallet"))
     await show(c, t, kb([B("Confirm", f"buyok:{p['id']}", "confirm"), B("Cancel", f"p:{p['id']}", "cancel")]))
 
 
@@ -1269,11 +1319,11 @@ async def cb_buyok(c: CallbackQuery):
         await put("users", uid)
         await put("orders", oid)
         await log_txn(uid, "purchase", -p["price"], f"#{oid} {p['name']}", bal=u["balance"])
-    head = f"{E('party')} <b>{esc(p['name'])} purchase successful, Now enjoy!</b> {E('ok')}"
+    head = f"{E('party')} <b>{esc(p['name'])} — purchase successful!</b> {E('ok')}\n<i>Now enjoy {EMOJI['spark']}</i>"
     await show(c, invoice_text(o, head), kb([B("My Orders", "ords:0", "my_orders"), B("Buy More", "buy", "buy")]))
-    await notify_admins(c.bot, f"{E('cart')} <b>New order #{oid}</b>\nUser: <code>{uid}</code> "
-                               f"(@{esc(c.from_user.username or '-')})\nProduct: {esc(p['name'])} · {money(p['price'])}",
-                        perm="dash")
+    await notify_admins(c.bot, hd("cart", f"New order #{oid}")
+                        + kv("profile", "User", f"<code>{uid}</code> (@{esc(c.from_user.username or '-')})")
+                        + kv("stock", "Product", f"{esc(p['name'])} · {money(p['price'])}"), perm="dash")
     await check_low(c.bot, pid)
 
 
@@ -1297,26 +1347,27 @@ async def cb_depm(c: CallbackQuery, state: FSMContext):
     if is_auto(name):                                   # Binance Pay -> verified automatically
         await state.set_state(Dep.trx)
         await state.update_data(method=name, auto=True, tries=0)
-        await show(c, f"{pay_icon(name)} <b>{esc(name)}</b>  {E('auto')} <i>Auto verified</i>\n{BAR}\n"
-                      f"{E('link')} <b>Pay ID / Account</b>\n<code>{esc(details)}</code>\n{BAR}\n"
-                      f"1️⃣ Send <b>USDT</b> to the account above via Binance Pay\n"
-                      f"2️⃣ Copy the <b>Order ID</b> of your payment\n"
-                      f"3️⃣ Paste it here 👇\n{BAR}\n"
-                      f"{E('money')} Rate: <b>1 USDT = {money(usd_rate())}</b>\n"
-                      f"{E('bolt')} <i>Balance is added instantly after verification.</i>",
+        await show(c, hd("binance", esc(name), "Auto verified · instant credit")
+                   + f"{E('link')} <b>Pay ID / Account</b>\n<code>{esc(details)}</code>\n"
+                   + sec("How it works")
+                   + "1️⃣ Send <b>USDT</b> to the account above via Binance Pay\n"
+                     "2️⃣ Copy the <b>Order ID</b> of your payment\n"
+                     "3️⃣ Paste it here 👇\n"
+                   + f"{DOT}\n" + kv("money", "Rate", f"<b>1 USDT = {money(usd_rate())}</b>")
+                   + ft("Balance is added instantly after verification"),
                    kb([B("Cancel", "close", "cancel")]))
         return
     await state.set_state(Dep.amount)
     await state.update_data(method=name)
-    await show(c, f"{pay_icon(name)} <b>{esc(name)}</b>  {E('manual')} <i>Admin verified</i>\n{BAR}\n"
-                  f"{E('link')} <b>Send money to</b>\n<code>{esc(details)}</code>\n{BAR}\n"
-                  f"1️⃣ Send the money to the number above\n"
-                  f"2️⃣ Type the <b>amount</b> you sent\n"
-                  f"3️⃣ Send your <b>Transaction ID</b>\n"
-                  f"4️⃣ Attach a screenshot <i>(optional)</i>\n{BAR}\n"
-                  f"{E('pending')} <i>Approval usually takes a few minutes.</i>\n"
-                  f"<i>Minimum: {money(min_deposit())}</i>\n\n"
-                  f"✍️ <b>Now type the amount you sent:</b>",
+    await show(c, hd("wallet", esc(name), "Admin verified · usually a few minutes")
+               + f"{E('link')} <b>Send money to</b>\n<code>{esc(details)}</code>\n"
+               + sec("Steps")
+               + "1️⃣ Send the money to the number above\n"
+                 "2️⃣ Type the <b>amount</b> you sent\n"
+                 "3️⃣ Send your <b>Transaction ID</b>\n"
+                 "4️⃣ Attach a screenshot <i>(optional)</i>\n"
+               + f"{DOT}\n" + kv("low", "Minimum", money(min_deposit()))
+               + "\n✍️ <b>Now type the amount you sent:</b>",
                kb([B("Cancel", "close", "cancel")]))
 
 
@@ -1330,30 +1381,30 @@ async def dep_amount(m: Message, state: FSMContext):
         return await m.answer(f"❗ Minimum deposit is <b>{money(min_deposit())}</b>")
     await state.update_data(amount=amt)
     await state.set_state(Dep.trx)
-    await m.answer(f"{E('ok')} Amount: <b>{money(amt)}</b>\n\n"
-                   f"🧾 Now send your <b>Transaction ID</b> (TrxID):",
+    await m.answer(hd("ok", "Amount saved") + kv("money", "Amount", f"<b>{money(amt)}</b>")
+                   + "\n🧾 Now send your <b>Transaction ID</b> (TrxID):",
                    reply_markup=kb([B("Cancel", "close", "cancel")]))
 
 
 async def auto_deposit(m: Message, state: FSMContext, d: dict, trx: str):
-    wait = await m.answer(f"{E('pending')} Verifying your payment with Binance…")
+    wait = await m.answer(f"{E('pending')} <b>Verifying your payment with Binance…</b>")
     st, tx = await binance_find(trx)
     if st == "error":
         await state.clear()
-        await notify_admins(m.bot, f"{E('low')} <b>Binance verification failed</b> (API error) for user "
-                                   f"<code>{m.from_user.id}</code>, Order ID <code>{esc(trx)}</code>. "
-                                   f"Open Settings → Test Binance API to see the exact error.", perm="set")
-        return await wait.edit_text(f"{E('no')} Verification is temporarily unavailable.\n"
-                                    "Please try again in a few minutes or contact support.")
+        await notify_admins(m.bot, hd("low", "Binance verification failed")
+                            + f"API error for user <code>{m.from_user.id}</code>\nOrder ID: <code>{esc(trx)}</code>\n"
+                              "<i>Open Settings → Test Binance API to see the exact error.</i>", perm="set")
+        return await wait.edit_text(hd("no", "Verification unavailable")
+                                    + "Please try again in a few minutes or contact support.")
     if st == "notfound":
         tries = int(d.get("tries", 0)) + 1
         if tries >= 5:
             await state.clear()
-            return await wait.edit_text(f"{E('no')} Payment not found after several tries.\n"
-                                        "Please check the Order ID or contact support.")
+            return await wait.edit_text(hd("no", "Payment not found")
+                                        + "We could not find it after several tries.\nPlease check the Order ID or contact support.")
         await state.update_data(tries=tries)
-        return await wait.edit_text(f"{E('no')} <b>Payment not found yet.</b>\nBinance can take a minute — "
-                                    f"check the Order ID and send it again. <i>({tries}/5)</i>",
+        return await wait.edit_text(hd("no", "Payment not found yet", f"Attempt {tries} of 5")
+                                    + "Binance can take a minute — check the Order ID and send it again.",
                                     reply_markup=kb([B("Cancel", "close", "cancel")]))
     try:
         amt = float(tx.get("amount", 0))
@@ -1364,8 +1415,8 @@ async def auto_deposit(m: Message, state: FSMContext, d: dict, trx: str):
         return await wait.edit_text(f"{E('no')} This is not an incoming payment.")
     if cur not in STABLE:
         await state.clear()
-        return await wait.edit_text(f"{E('no')} Unsupported currency <b>{esc(cur)}</b>. Please pay in USDT "
-                                    "or contact support.")
+        return await wait.edit_text(hd("no", "Unsupported currency") + f"<b>{esc(cur)}</b> is not accepted. "
+                                                                       "Please pay in USDT or contact support.")
     credit = round(amt * usd_rate(), 2)
     async with dep_lock:
         if trx_used(trx):
@@ -1382,14 +1433,16 @@ async def auto_deposit(m: Message, state: FSMContext, d: dict, trx: str):
         await put("users", m.from_user.id)
         await log_txn(m.from_user.id, "deposit", credit, f"Binance auto · #{did}", bal=bal)
     await state.clear()
-    await wait.edit_text(f"{E('ok')} <b>Deposit successful!</b>\n{BAR}\n"
-                         f"{E('binance')} Received: <b>{amt:g} {esc(cur)}</b>\n"
-                         f"{E('money')} Credited: <b>{money(credit)}</b>\n"
-                         f"{E('wallet')} New balance: <b>{money(bal)}</b>",
+    await wait.edit_text(hd("ok", "Deposit successful!", "Your wallet has been topped up")
+                         + kv("binance", "Received", f"<b>{amt:g} {esc(cur)}</b>")
+                         + kv("money", "Credited", f"<b>{money(credit)}</b>")
+                         + kv("wallet", "New balance", f"<b>{money(bal)}</b>")
+                         + ft("Happy shopping!"),
                          reply_markup=kb([B("Buy Product", "buy", "buy")]))
-    await notify_admins(m.bot, f"{E('auto')} <b>Auto deposit #{did}</b>\nUser: <code>{m.from_user.id}</code> "
-                               f"(@{esc(m.from_user.username or '-')})\n{amt:g} {esc(cur)} → <b>{money(credit)}</b>\n"
-                               f"Order ID: <code>{esc(trx)}</code>", perm="deps")
+    await notify_admins(m.bot, hd("auto", f"Auto deposit #{did}")
+                        + kv("profile", "User", f"<code>{m.from_user.id}</code> (@{esc(m.from_user.username or '-')})")
+                        + kv("binance", "Paid", f"{amt:g} {esc(cur)} → <b>{money(credit)}</b>")
+                        + kv("id", "Order ID", f"<code>{esc(trx)}</code>"), perm="deps")
 
 
 @router.message(StateFilter(Dep.trx))
@@ -1398,19 +1451,19 @@ async def dep_trx(m: Message, state: FSMContext):
     if len(trx) < 4 or len(trx) > 120:
         return await m.answer("❗ Please send a valid Transaction ID (text).")
     if trx_used(trx):
-        return await m.answer(f"{E('no')} <b>This Transaction ID was already submitted.</b>\n"
-                              "Each ID can only be used once. Send a different one or /cancel")
+        return await m.answer(hd("no", "Already submitted") + "Each Transaction ID can only be used once.\n"
+                                                              "Send a different one or /cancel")
     if d.get("auto"):
         return await auto_deposit(m, state, d, trx)
     if pending_count(m.from_user.id) >= MAX_PENDING:
         await state.clear()
-        return await m.answer(f"{E('pending')} You already have <b>{MAX_PENDING}</b> pending deposits.\n"
-                              "Please wait until they are approved.")
+        return await m.answer(hd("pending", "Too many pending deposits")
+                              + f"You already have <b>{MAX_PENDING}</b> pending deposits.\nPlease wait until they are approved.")
     await state.update_data(trx=trx)
     await state.set_state(Dep.ss)
-    await m.answer(f"{E('photo')} <b>Payment screenshot</b> <i>(optional)</i>\n\n"
-                   "Send a screenshot of your payment to get approved faster, or tap <b>Skip</b>.\n"
-                   "<i>Send it as a photo, not as a file.</i>",
+    await m.answer(hd("photo", "Payment screenshot", "Optional · faster approval")
+                   + "Send a screenshot of your payment, or tap <b>Skip</b>.\n"
+                     "<i>Send it as a photo, not as a file.</i>",
                    reply_markup=kb([B("Skip & Submit", "depskip", "skip")],
                                    [B("Cancel", "close", "cancel")]))
 
@@ -1430,24 +1483,25 @@ async def finish_manual(bot: Bot, user, chat_msg: Message, state: FSMContext, ss
                                    "ss": ss[0] if ss else "", "ss_uid": ss[1] if ss else ""}
         await put("deposits", did)
     await state.clear()
-    await chat_msg.answer(f"{E('ok')} <b>Deposit request submitted!</b>\n{BAR}\n"
-                          f"{E('id')} Request: <b>#{did}</b>\n"
-                          f"{pay_icon(d['method'])} Method: <b>{esc(d['method'])}</b>\n"
-                          f"{E('money')} Amount: <b>{money(d['amount'])}</b>\n"
-                          f"🧾 Trx: <code>{esc(d['trx'])}</code>\n{BAR}\n"
-                          f"{E('pending')} <i>Our team will verify it shortly. You'll be notified once approved.</i>",
+    await chat_msg.answer(hd("ok", "Deposit request submitted!", "Our team will verify it shortly")
+                          + kv("id", "Request", f"<b>#{did}</b>")
+                          + f"{pay_icon(d['method'])} <b>Method</b>  ›  {esc(d['method'])}\n"
+                          + kv("money", "Amount", f"<b>{money(d['amount'])}</b>")
+                          + kv("invoice", "Trx", f"<code>{esc(d['trx'])}</code>")
+                          + ft("You'll be notified once it is approved"),
                           reply_markup=kb([B("My Transactions", "txh:0", "history")]))
     u = get_user(user.id) or {}
     prev = sum(x["amount"] for x in D["deposits"].values() if x["user_id"] == user.id and x["status"] == "approved")
     await notify_admins(
-        bot, f"{E('money')} <b>New deposit #{did}</b>  {E('pending')}\n{BAR}\n"
-             f"{E('profile')} {esc(u.get('full_name') or '-')} · @{esc(user.username or '-')}\n"
-             f"{E('id')} <code>{user.id}</code> · {rank_of(u.get('spent', 0))}\n"
-             f"{E('wallet')} Balance: {money(u.get('balance', 0))} · Past deposits: {money(prev)}\n{BAR}\n"
-             f"{pay_icon(d['method'])} Method: <b>{esc(d['method'])}</b>\n"
-             f"{E('money')} Amount: <b>{money(d['amount'])}</b>\n"
-             f"🧾 Trx: <code>{esc(d['trx'])}</code>\n"
-             f"{E('photo')} Screenshot: {'yes ⬆️' if ss else 'no'}",
+        bot, hd("money", f"New deposit #{did}", "Waiting for approval")
+             + kv("profile", "User", f"{esc(u.get('full_name') or '-')} · @{esc(user.username or '-')}")
+             + kv("id", "ID", f"<code>{user.id}</code> · {rank_of(u.get('spent', 0))}")
+             + kv("wallet", "Balance", f"{money(u.get('balance', 0))} · past deposits {money(prev)}")
+             + DOT + "\n"
+             + f"{pay_icon(d['method'])} <b>Method</b>  ›  {esc(d['method'])}\n"
+             + kv("money", "Amount", f"<b>{money(d['amount'])}</b>")
+             + kv("invoice", "Trx", f"<code>{esc(d['trx'])}</code>")
+             + kv("photo", "Screenshot", "yes ⬆️" if ss else "no"),
         kb([B("Approve", f"adm:dok:{did}", "x_ok"), B("Reject", f"adm:dno:{did}", "x_no")],
            [B("User", f"adm:u:{user.id}", "x_edit", fb="👤")]),
         perm="deps", photo=ss[0] if ss else None)
@@ -1519,18 +1573,20 @@ async def screen_stats(ev):
     day = int(time.time()) - 86400
     users, orders, deps = D["users"].values(), D["orders"].values(), D["deposits"].values()
     tg_left = sum(1 for a in D["tgacc"].values() if not a["sold"] and a.get("active", 1))
-    t = (f"{E('stats')} <b>Dashboard</b>\n{BAR}\n"
-         f"{E('users')} Users: <b>{len(D['users'])}</b> (+{sum(1 for u in users if u['joined_at'] > day)} today)\n"
-         f"{E('stock')} Products: <b>{len(D['products'])}</b> · Stock left: "
-         f"<b>{sum(1 for s in D['stock'].values() if not s['sold'])}</b>\n"
-         f"{E('phone')} TG accounts in stock: <b>{tg_left}</b>\n"
-         f"{E('low')} Low-stock products: <b>{len(low_list())}</b>\n"
-         f"{E('orders')} Orders: <b>{len(D['orders'])}</b>\n"
-         f"{E('cart')} Revenue: <b>{money(sum(o['price'] for o in orders))}</b> "
-         f"(24h: {money(sum(o['price'] for o in orders if o['created_at'] > day))})\n"
-         f"{E('money')} Deposits approved: <b>{money(sum(d['amount'] for d in deps if d['status'] == 'approved'))}</b>\n"
-         f"{E('pending')} Pending deposits: <b>{sum(1 for d in deps if d['status'] == 'pending')}</b>\n"
-         f"{E('wallet')} Users' total balance: <b>{money(sum(u['balance'] for u in users))}</b>")
+    t = (hd("stats", "Dashboard", f"Live overview · {datetime.now().strftime('%d %b, %H:%M')}")
+         + sec("Customers")
+         + kv("users", "Users", f"<b>{len(D['users'])}</b> <i>(+{sum(1 for u in users if u['joined_at'] > day)} today)</i>")
+         + kv("wallet", "Wallet total", f"<b>{money(sum(u['balance'] for u in users))}</b>")
+         + sec("Inventory")
+         + kv("stock", "Products", f"<b>{len(D['products'])}</b> · stock left <b>{sum(1 for s in D['stock'].values() if not s['sold'])}</b>")
+         + kv("phone", "TG accounts", f"<b>{tg_left}</b> in stock")
+         + kv("low", "Low stock", f"<b>{len(low_list())}</b> product(s)")
+         + sec("Money")
+         + kv("orders", "Orders", f"<b>{len(D['orders'])}</b>")
+         + kv("cart", "Revenue", f"<b>{money(sum(o['price'] for o in orders))}</b> <i>(24h {money(sum(o['price'] for o in orders if o['created_at'] > day))})</i>")
+         + kv("money", "Deposits", f"<b>{money(sum(d['amount'] for d in deps if d['status'] == 'approved'))}</b>")
+         + kv("pending", "Pending", f"<b>{sum(1 for d in deps if d['status'] == 'pending')}</b> deposit(s)")
+         + BAR)
     await show(ev, t, kb([B("Refresh", "adm:stats", "x_refresh"), B("Low Stock", "adm:low", "x_low")],
                          [B("Sales Report", "adm:rep:7", "a_report")]))
 
@@ -1545,12 +1601,12 @@ async def screen_low(ev):
     rows = low_list()
     th = low_threshold()
     if not rows:
-        return await show(ev, f"{E('low')} <b>Low Stock</b>\n\n<i>All active products have more than {th} items 🎉</i>",
+        return await show(ev, hd("low", "Low Stock") + f"<i>All active products have more than {th} items 🎉</i>",
                           kb([B("Back", "adm:stats", "x_nav")]))
     btns = [[B(f"{p['name']} · {p['stk']} left", f"adm:p:{p['id']}", "x_item", cid=p.get("emoji"), fb="")]
             for p in rows[:25]]
     btns.append([B("Back", "adm:stats", "x_nav")])
-    await show(ev, f"{E('low')} <b>Low Stock</b>  <i>(≤ {th} items)</i>\nTap a product to add stock 👇", kb(*btns))
+    await show(ev, hd("low", "Low Stock", f"Products with ≤ {th} items") + "Tap a product to add stock 👇", kb(*btns))
 
 
 @admin.callback_query(F.data == "adm:low")
@@ -1580,21 +1636,22 @@ async def screen_report(ev, days=7):
         buyers[o["user_id"]] = buyers.get(o["user_id"], 0.0) + o["price"]
     top_p = sorted(prods.items(), key=lambda x: -x[1][1])[:5]
     top_b = sorted(buyers.items(), key=lambda x: -x[1])[:5]
-    t = (f"{E('report')} <b>Sales Report</b> — {PERIODS[days]}\n{BAR}\n"
-         f"{E('orders')} Orders: <b>{len(orders)}</b>\n"
-         f"{E('cart')} Revenue: <b>{money(rev)}</b>\n"
-         f"{E('stats')} Avg order: <b>{money(rev / len(orders) if orders else 0)}</b>\n"
-         f"{E('money')} Deposits: <b>{money(sum(d['amount'] for d in deps))}</b> ({len(deps)})\n"
-         f"{E('users')} New users: <b>{new_users}</b>\n")
+    t = (hd("report", "Sales Report", PERIODS[days])
+         + kv("orders", "Orders", f"<b>{len(orders)}</b>")
+         + kv("cart", "Revenue", f"<b>{money(rev)}</b>")
+         + kv("stats", "Avg order", f"<b>{money(rev / len(orders) if orders else 0)}</b>")
+         + kv("money", "Deposits", f"<b>{money(sum(d['amount'] for d in deps))}</b> <i>({len(deps)})</i>")
+         + kv("users", "New users", f"<b>{new_users}</b>"))
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
     if top_p:
-        t += f"\n{E('star')} <b>Top products</b>\n"
-        for i, (n, (cnt, r)) in enumerate(top_p, 1):
-            t += f"{i}. {esc(n)} — {cnt} sold · {money(r)}\n"
+        t += sec("Top products")
+        for i, (n, (cnt, r)) in enumerate(top_p):
+            t += f"{medals[i]} {esc(n)} — <b>{cnt}</b> sold · {money(r)}\n"
     if top_b:
-        t += f"\n{E('crown')} <b>Top buyers</b>\n"
-        for i, (uid, r) in enumerate(top_b, 1):
+        t += sec("Top buyers")
+        for i, (uid, r) in enumerate(top_b):
             u = get_user(uid) or {}
-            t += f"{i}. {esc((u.get('full_name') or '-')[:20])} (<code>{uid}</code>) — {money(r)}\n"
+            t += f"{medals[i]} {esc((u.get('full_name') or '-')[:20])} (<code>{uid}</code>) — {money(r)}\n"
     if not orders:
         t += "\n<i>No sales in this period.</i>"
     per = [B(("• " if k == days else "") + lab, f"adm:rep:{k}", "x_period", fb="") for k, lab in PERIODS.items()]
@@ -1635,7 +1692,7 @@ async def screen_acats(ev):
         n = sum(1 for p in D["products"].values() if str(p["category"]) == str(c["id"]))
         btns.append([B(f"{c['name']} · {n} products", f"adm:c:{c['id']}", "x_item", cid=c.get("emoji"), fb=c.get("fb", "📁"))])
     btns.append([B("Add Category", "adm:addc", "x_add")])
-    await show(ev, "📁 <b>Categories</b>\n\nTap a category to edit it.", kb(*btns))
+    await show(ev, hd("tag", "Categories", f"{len(cats)} total") + "Tap a category to edit it 👇", kb(*btns))
 
 
 @admin.callback_query(F.data == "adm:cats")
@@ -1647,7 +1704,8 @@ async def adm_cats(c: CallbackQuery, state: FSMContext):
 @admin.callback_query(F.data == "adm:addc")
 async def adm_addc(c: CallbackQuery, state: FSMContext):
     await state.set_state(AddC.name)
-    await show(c, "📁 Send the <b>category name</b> (e.g. <code>Mail</code>)", kb([B("Cancel", "adm:cats", "x_no")]))
+    await show(c, hd("tag", "New Category") + "Send the <b>category name</b> <i>(e.g.</i> <code>Mail</code><i>)</i>",
+               kb([B("Cancel", "adm:cats", "x_no")]))
 
 
 @admin.message(StateFilter(AddC.name))
@@ -1659,7 +1717,7 @@ async def addc_name(m: Message, state: FSMContext):
     D["cats"][str(cid)] = {"id": cid, "name": name, "emoji": "", "fb": "📁"}
     await put("cats", cid)
     await state.clear()
-    await m.answer(f"{E('ok')} Category <b>{esc(name)}</b> created.\nNow set its custom emoji if you like 👇",
+    await m.answer(hd("ok", "Category created") + f"<b>{esc(name)}</b>\n<i>Now set its custom emoji if you like 👇</i>",
                    reply_markup=kb([B("Set Emoji", f"adm:cem:{cid}", "x_edit", fb="⭐")],
                                    [B("Categories", "adm:cats", "x_nav")]))
 
@@ -1672,8 +1730,10 @@ async def adm_cat(c: CallbackQuery, state: FSMContext):
     if not cat:
         return await c.answer("Not found", show_alert=True)
     n = sum(1 for p in D["products"].values() if str(p["category"]) == cid)
-    t = (f"📁 <b>{esc(cat['name'])}</b>\nID: <code>{cid}</code> · Products: <b>{n}</b>\n"
-         f"Custom emoji: <code>{cat.get('emoji') or 'none'}</code>")
+    t = (hd("tag", esc(cat["name"]), "Category")
+         + kv("id", "ID", f"<code>{cid}</code>")
+         + kv("stock", "Products", f"<b>{n}</b>")
+         + kv("star", "Custom emoji", f"<code>{cat.get('emoji') or 'none'}</code>"))
     await show(c, t, kb(
         [B("Set Emoji", f"adm:cem:{cid}", "x_edit", fb="⭐"), B("Rename", f"adm:crn:{cid}", "x_edit")],
         [B("Delete", f"adm:cdel:{cid}", "x_no", fb="🗑")],
@@ -1684,7 +1744,7 @@ async def adm_cat(c: CallbackQuery, state: FSMContext):
 async def adm_crn(c: CallbackQuery, state: FSMContext):
     await state.set_state(RenC.name)
     await state.update_data(cid=c.data.split(":")[2])
-    await show(c, "✏️ Send the <b>new category name</b>:", kb([B("Cancel", "adm:cats", "x_no")]))
+    await show(c, hd("tag", "Rename Category") + "Send the <b>new category name</b>:", kb([B("Cancel", "adm:cats", "x_no")]))
 
 
 @admin.message(StateFilter(RenC.name))
@@ -1719,7 +1779,7 @@ async def screen_aprods(ev, page=0):
     if nr:
         btns.append(nr)
     btns.append([B("Add Product", "adm:addp", "x_add")])
-    await show(ev, f"{E('stock')} <b>Products</b>  <i>(🟢 active · 🔴 hidden · stock)</i>", kb(*btns))
+    await show(ev, hd("stock", "Products", f"{len(rows)} total · 🟢 active · 🔴 hidden · stock count"), kb(*btns))
 
 
 @admin.callback_query(F.data.startswith("adm:pl:"))
@@ -1742,28 +1802,30 @@ async def adm_addp(c: CallbackQuery, state: FSMContext):
     if row:
         btns.append(row)
     btns.append([B("Cancel", "close", "x_no")])
-    await show(c, f"{E('stock')} <b>Add Product</b>\n\nChoose a category:", kb(*btns))
+    await show(c, hd("stock", "Add Product", "Step 1 of 3") + "Choose a category:", kb(*btns))
 
 
 @admin.callback_query(F.data.startswith("adm:addpc:"))
 async def adm_addp_cat(c: CallbackQuery, state: FSMContext):
     await state.set_state(AddP.name)
     await state.update_data(cat=int(c.data.split(":")[2]))
-    await show(c, "✏️ Send the <b>product name</b>\n<i>e.g. Nord VPN 7 Day</i>", kb([B("Cancel", "close", "x_no")]))
+    await show(c, hd("stock", "Add Product", "Step 2 of 3") + "✏️ Send the <b>product name</b>\n<i>e.g. Nord VPN 7 Day</i>",
+               kb([B("Cancel", "close", "x_no")]))
 
 
 @admin.message(StateFilter(AddP.name))
 async def addp_name(m: Message, state: FSMContext):
     await state.update_data(name=(m.text or "").strip())
     await state.set_state(AddP.desc)
-    await m.answer("📝 Send the <b>description</b> (features, validity, region…)\n<i>Premium/custom emoji and bold/italic formatting are kept as you send them.</i>")
+    await m.answer("📝 Send the <b>description</b> <i>(features, validity, region…)</i>\n"
+                   "<i>Premium/custom emoji and bold/italic formatting are kept as you send them.</i>")
 
 
 @admin.message(StateFilter(AddP.desc))
 async def addp_desc(m: Message, state: FSMContext):
     await state.update_data(desc=m.html_text.strip())
     await state.set_state(AddP.price)
-    await m.answer(f"{E('money')} Send the <b>price</b> (number, in {CURRENCY})")
+    await m.answer(f"{E('money')} Send the <b>price</b> <i>(number, in {CURRENCY})</i>")
 
 
 @admin.message(StateFilter(AddP.price))
@@ -1778,7 +1840,7 @@ async def addp_price(m: Message, state: FSMContext):
                                "price": price, "active": 1, "emoji": "", "dhtml": 1}
     await put("products", pid)
     await state.clear()
-    await m.answer(f"{E('ok')} Product created!", reply_markup=kb(
+    await m.answer(hd("ok", "Product created!") + "Add some stock so customers can buy it 👇", reply_markup=kb(
         [B("Add / Import Stock", f"adm:stk:{pid}", "x_import"), B("Set Emoji", f"adm:pem:{pid}", "x_edit", fb="⭐")],
         [B("Products", "adm:pl:0", "x_nav")]))
 
@@ -1788,11 +1850,12 @@ async def render_admin_product(c: CallbackQuery, pid: int):
     if not p:
         return await c.answer("Not found", show_alert=True)
     sold = sum(1 for s in D["stock"].values() if int(s["pid"]) == pid and s["sold"])
-    t = (f"{E('stock')} <b>#{p['id']} {esc(p['name'])}</b>\nCategory: <b>{esc(cat_name(p['category']))}</b>\n\n"
-         f"{desc_html(p)}\n\nPrice: <b>{money(p['price'])}</b>\n"
-         f"In stock: <b>{p['stk']}</b> · Sold: <b>{sold}</b>\n"
-         f"Emoji: <code>{p.get('emoji') or 'none'}</code>\n"
-         f"Status: {'🟢 Active' if p['active'] else '🔴 Hidden'}")
+    t = (hd("stock", f"#{p['id']} {esc(p['name'])}", esc(cat_name(p["category"])))
+         + f"{quote(desc_html(p), expand=True)}\n"
+         + kv("tag", "Price", f"<b>{money(p['price'])}</b>")
+         + kv("stock", "In stock", f"<b>{p['stk']}</b> · sold <b>{sold}</b>")
+         + kv("star", "Emoji", f"<code>{p.get('emoji') or 'none'}</code>")
+         + kv("bolt", "Status", "🟢 Active" if p["active"] else "🔴 Hidden"))
     await show(c, t, kb(
         [B("Add / Import Stock", f"adm:stk:{pid}", "x_import"), B("Edit Price", f"adm:ep:{pid}", "x_edit")],
         [B("Edit Description", f"adm:ed:{pid}", "x_edit", fb="📝"), B("Set Emoji", f"adm:pem:{pid}", "x_edit", fb="⭐")],
@@ -1820,7 +1883,7 @@ async def adm_toggle(c: CallbackQuery):
 @admin.callback_query(F.data.startswith("adm:del:"))
 async def adm_del(c: CallbackQuery):
     pid = int(c.data.split(":")[2])
-    await show(c, "⚠️ <b>Delete this product and all its unsold stock?</b>",
+    await show(c, hd("low", "Delete product?") + "This removes the product and all its <b>unsold</b> stock.",
                kb([B("Yes, delete", f"adm:delok:{pid}", "x_no", fb="🗑"), B("No", f"adm:p:{pid}", "x_ok")]))
 
 
@@ -1842,7 +1905,7 @@ async def adm_delok(c: CallbackQuery):
 async def adm_ep(c: CallbackQuery, state: FSMContext):
     await state.set_state(EditPrice.price)
     await state.update_data(pid=int(c.data.split(":")[2]))
-    await show(c, "✏️ Send the <b>new price</b>:", kb([B("Cancel", "close", "x_no")]))
+    await show(c, hd("tag", "Edit Price") + "✏️ Send the <b>new price</b>:", kb([B("Cancel", "close", "x_no")]))
 
 
 @admin.message(StateFilter(EditPrice.price))
@@ -1864,7 +1927,7 @@ async def ep_save(m: Message, state: FSMContext):
 async def adm_ed(c: CallbackQuery, state: FSMContext):
     await state.set_state(EditDesc.text)
     await state.update_data(pid=int(c.data.split(":")[2]))
-    await show(c, "📝 Send the <b>new description</b>.\n<i>Premium/custom emoji and formatting are kept.</i>",
+    await show(c, hd("tag", "Edit Description") + "📝 Send the <b>new description</b>.\n<i>Premium/custom emoji and formatting are kept.</i>",
                kb([B("Cancel", "close", "x_no")]))
 
 
@@ -1884,11 +1947,12 @@ async def ed_save(m: Message, state: FSMContext):
 async def adm_stk(c: CallbackQuery, state: FSMContext):
     await state.set_state(AddStock.lines)
     await state.update_data(pid=int(c.data.split(":")[2]))
-    await show(c, f"{E('import')} <b>Add / Import Stock</b>\n\n"
-                  "Send items as <b>text</b> (one per line) <b>or upload a .txt / .csv file</b> (one item per line).\n"
-                  "For multi-line items, separate them with a line containing only <code>---</code>.\n"
-                  "<i>Duplicates (already in stock or sold) are skipped automatically.</i>\n\n"
-                  "<i>Example:</i>\n<code>1.2.3.4:8080:user:pass\n5.6.7.8:8080:user:pass</code>",
+    await show(c, hd("import", "Add / Import Stock", "Text or .txt / .csv file")
+               + "Send items as <b>text</b> (one per line) <b>or upload a file</b> (one item per line).\n"
+                 "Multi-line items: separate them with a line containing only <code>---</code>.\n"
+                 "<i>Duplicates (already in stock or sold) are skipped automatically.</i>\n"
+               + sec("Example")
+               + "<pre>1.2.3.4:8080:user:pass\n5.6.7.8:8080:user:pass</pre>",
                kb([B("Cancel", "close", "x_no")]))
 
 
@@ -1930,8 +1994,8 @@ async def stk_save(m: Message, state: FSMContext):
             D["stock"][str(sid)] = {"pid": pid, "data": x, "sold": 0}
         await put("stock", *ids)
     await state.clear()
-    await m.answer(f"{E('ok')} Added <b>{len(fresh)}</b> items to stock."
-                   + (f"\n{E('low')} Skipped <b>{dup}</b> duplicate(s)." if dup else ""),
+    await m.answer(hd("ok", "Stock updated") + kv("import", "Added", f"<b>{len(fresh)}</b> item(s)")
+                   + (kv("low", "Skipped", f"<b>{dup}</b> duplicate(s)") if dup else ""),
                    reply_markup=kb([B("Back to product", f"adm:p:{pid}", "x_nav")]))
     await check_low(m.bot, pid)
 
@@ -1941,11 +2005,11 @@ async def screen_adeps(ev):
     rows = sorted((d for d in D["deposits"].values() if d["status"] == "pending"), key=lambda d: d["id"])[:20]
     hist = [B("History", "adm:dh:0", "x_hist")]
     if not rows:
-        return await show(ev, f"{E('money')} <b>Pending Deposits</b>\n\n<i>Nothing pending 🎉</i>", kb(hist))
+        return await show(ev, hd("money", "Pending Deposits") + "<i>Nothing pending 🎉</i>", kb(hist))
     btns = [[B(f"#{d['id']} · {money(d['amount'])} · {d['method']} · {d['user_id']}" + (" 🖼" if d.get("ss") else ""),
                f"adm:d:{d['id']}", "x_item", fb="⏳")] for d in rows]
     btns.append(hist)
-    await show(ev, f"{E('money')} <b>Pending Deposits</b>  <i>({len(rows)})</i>", kb(*btns))
+    await show(ev, hd("money", "Pending Deposits", f"{len(rows)} waiting for approval") + "Tap one to review 👇", kb(*btns))
 
 
 @admin.callback_query(F.data == "adm:deps")
@@ -1964,7 +2028,7 @@ async def adm_dh(c: CallbackQuery):
     if nr:
         btns.append(nr)
     btns.append([B("Back", "adm:deps", "x_nav")])
-    await show(c, f"{E('hist')} <b>Deposit History</b>  <i>({len(rows)} total)</i>", kb(*btns))
+    await show(c, hd("hist", "Deposit History", f"{len(rows)} total"), kb(*btns))
 
 
 @admin.callback_query(F.data.startswith("adm:d:"))
@@ -1972,11 +2036,12 @@ async def adm_dep(c: CallbackQuery):
     d = D["deposits"].get(c.data.split(":")[2])
     if not d:
         return await c.answer("Not found", show_alert=True)
-    t = (f"{E('money')} <b>Deposit #{d['id']}</b>\n{BAR}\nUser: <code>{d['user_id']}</code>\n"
-         f"Method: {pay_icon(d['method'])} {esc(d['method'])}\n"
-         f"Amount: <b>{money(d['amount'])}</b>" + (f" ({esc(d['raw'])})" if d.get("raw") else "") + "\n"
-         f"Trx: <code>{esc(d['trx'])}</code>\nStatus: <b>{d['status']}</b>"
-         + (" · auto" if d.get("auto") else "") + f"\nDate: {fdate(d['created_at'])}")
+    t = (hd("money", f"Deposit #{d['id']}", f"{fdate(d['created_at'])}")
+         + kv("profile", "User", f"<code>{d['user_id']}</code>")
+         + f"{pay_icon(d['method'])} <b>Method</b>  ›  {esc(d['method'])}\n"
+         + kv("money", "Amount", f"<b>{money(d['amount'])}</b>" + (f" <i>({esc(d['raw'])})</i>" if d.get("raw") else ""))
+         + kv("invoice", "Trx", f"<code>{esc(d['trx'])}</code>")
+         + kv("bolt", "Status", f"<b>{d['status']}</b>" + (" · auto" if d.get("auto") else "")))
     rows = []
     if d["status"] == "pending":
         rows.append([B("Approve", f"adm:dok:{d['id']}", "x_ok"), B("Reject", f"adm:dno:{d['id']}", "x_no")])
@@ -2018,9 +2083,10 @@ async def adm_dok(c: CallbackQuery):
     await c.answer("Approved ✅")
     try:
         await c.bot.send_message(
-            d["user_id"], f"{E('ok')} <b>Deposit Approved!</b>\n{BAR}\n"
-                          f"{E('money')} Amount: <b>{money(d['amount'])}</b>\n"
-                          f"{E('wallet')} New balance: <b>{money(bal if bal is not None else 0)}</b>",
+            d["user_id"], hd("ok", "Deposit approved!", f"Request #{did}")
+            + kv("money", "Amount", f"<b>{money(d['amount'])}</b>")
+            + kv("wallet", "New balance", f"<b>{money(bal if bal is not None else 0)}</b>")
+            + ft("Happy shopping!"),
             reply_markup=kb([B("Buy Product", "buy", "buy")]))
     except Exception:
         pass
@@ -2038,8 +2104,8 @@ async def adm_dno(c: CallbackQuery):
     await stamp(c, f"\n\n{E('no')} <b>Rejected by {esc(c.from_user.full_name)}</b>")
     await c.answer("Rejected ❌")
     try:
-        await c.bot.send_message(d["user_id"], f"{E('no')} <b>Deposit #{did} rejected</b>\n"
-                                               "If you think this is a mistake, please contact support.")
+        await c.bot.send_message(d["user_id"], hd("no", f"Deposit #{did} rejected")
+                                 + "If you think this is a mistake, please contact support.")
     except Exception:
         pass
 
@@ -2058,8 +2124,7 @@ async def screen_users(ev, page=0):
         btns.append(nr)
     btns.append([B("Search User", "adm:find", "x_edit", fb="🔎")])
     banned = sum(1 for u in rows if u["banned"])
-    await show(ev, f"{E('users')} <b>Users</b>\nTotal: <b>{len(rows)}</b> · Banned: <b>{banned}</b>\n"
-                   f"<i>Newest first - tap a user to manage</i>", kb(*btns))
+    await show(ev, hd("users", "Users", f"Total {len(rows)} · Banned {banned}") + "Newest first — tap a user to manage 👇", kb(*btns))
 
 
 @admin.callback_query(F.data.startswith("adm:ul:"))
@@ -2071,7 +2136,7 @@ async def adm_ul(c: CallbackQuery, state: FSMContext):
 @admin.callback_query(F.data == "adm:find")
 async def adm_find(c: CallbackQuery, state: FSMContext):
     await state.set_state(FindUser.query)
-    await show(c, "🔎 Send a <b>user ID</b> or <b>@username</b>:", kb([B("Cancel", "close", "x_no")]))
+    await show(c, hd("users", "Search User") + "🔎 Send a <b>user ID</b> or <b>@username</b>:", kb([B("Cancel", "close", "x_no")]))
 
 
 def user_panel(uid: int):
@@ -2081,12 +2146,14 @@ def user_panel(uid: int):
     n = sum(1 for o in D["orders"].values() if o["user_id"] == uid)
     un = f"@{esc(u['username'])}" if u.get("username") else "—"
     role = "Owner" if is_owner(uid) else ("Sub admin" if str(uid) in D["subs"] else "User")
-    t = (f"{E('profile')} <b>{esc(u.get('full_name') or '-')}</b>\n{BAR}\n"
-         f"{E('id')} <code>{uid}</code> · {un}\n{E('wallet')} Balance: <b>{money(u['balance'])}</b>\n"
-         f"{E('cart')} Spent: <b>{money(u['spent'])}</b>\n{E('orders')} Orders: <b>{n}</b>\n"
-         f"{E('rank')} Rank: {rank_of(u['spent'])}\n{E('date')} Joined: {fdate(u['joined_at'])}\n"
-         f"Role: <b>{role}</b>\n"
-         f"Status: {'🚫 Banned' if u['banned'] else '✅ Active'}")
+    t = (hd("profile", esc(u.get("full_name") or "-"), f"{rank_of(u['spent'])} · {role}")
+         + kv("id", "ID", f"<code>{uid}</code>")
+         + kv("link", "Username", un)
+         + kv("wallet", "Balance", f"<b>{money(u['balance'])}</b>")
+         + kv("cart", "Spent", money(u["spent"]))
+         + kv("orders", "Orders", f"<b>{n}</b>")
+         + kv("date", "Joined", fdate(u["joined_at"]))
+         + kv("bolt", "Status", "🚫 Banned" if u["banned"] else "✅ Active"))
     return t, kb(
         [B("Add Balance", f"adm:adj:{uid}:+", "x_ok", fb="➕"), B("Deduct", f"adm:adj:{uid}:-", "x_no", fb="➖")],
         [B("Orders", f"adm:uo:{uid}", "x_edit", fb="📦"), B("Transactions", f"adm:ut:{uid}:0", "x_hist")],
@@ -2142,7 +2209,7 @@ async def adm_uo(c: CallbackQuery):
         return await c.answer("No orders.", show_alert=True)
     btns = [[B(f"#{o['id']} · {o['product_name']} · {money(o['price'])}", f"adm:o:{o['id']}", "x_item", fb="🧾")] for o in rows]
     btns.append([B("Back", f"adm:u:{uid}", "x_nav")])
-    await show(c, f"{E('orders')} <b>Orders of <code>{uid}</code></b> <i>(last 15)</i>", kb(*btns))
+    await show(c, hd("orders", "Orders", f"User <code>{uid}</code> · last 15"), kb(*btns))
 
 
 @admin.callback_query(F.data.startswith("adm:o:"))
@@ -2158,7 +2225,8 @@ async def adm_adj(c: CallbackQuery, state: FSMContext):
     _, _, uid, sign = c.data.split(":")
     await state.set_state(Adjust.amount)
     await state.update_data(uid=int(uid), sign=sign)
-    await show(c, f"Send the amount to <b>{'add to' if sign == '+' else 'deduct from'}</b> the balance:",
+    await show(c, hd("wallet", "Adjust Balance", f"User <code>{uid}</code>")
+               + f"Send the amount to <b>{'add to' if sign == '+' else 'deduct from'}</b> the balance:",
                kb([B("Cancel", "close", "x_no")]))
 
 
@@ -2178,10 +2246,10 @@ async def adj_save(m: Message, state: FSMContext):
                       f"by {m.from_user.full_name}", bal=u["balance"])
     await state.clear()
     t, mk = user_panel(d["uid"])
-    await m.answer(f"{E('ok')} Balance updated.\n\n{t}", reply_markup=mk)
+    await m.answer(f"{E('ok')} <b>Balance updated.</b>\n\n{t}", reply_markup=mk)
     try:
-        await m.bot.send_message(d["uid"], f"{E('wallet')} Your balance was adjusted by "
-                                           f"<b>{'+' if delta >= 0 else '-'}{money(abs(delta))}</b> by admin.")
+        await m.bot.send_message(d["uid"], hd("wallet", "Balance adjusted")
+                                 + f"Your balance was adjusted by <b>{'+' if delta >= 0 else '-'}{money(abs(delta))}</b> by admin.")
     except Exception:
         pass
 
@@ -2231,7 +2299,7 @@ async def screen_bc_audience(ev):
         btns.append(row)
     btns.append([B("By User IDs", "adm:bca:ids", "x_aud")])
     btns.append([B("Cancel", "close", "x_no")])
-    await show(ev, f"{E('target')} <b>Broadcast — choose audience</b>\n\nBanned users are always excluded.", kb(*btns))
+    await show(ev, hd("target", "Broadcast", "Choose your audience") + "<i>Banned users are always excluded.</i>", kb(*btns))
 
 
 @admin.callback_query(F.data.startswith("adm:bca:"))
@@ -2239,15 +2307,14 @@ async def adm_bca(c: CallbackQuery, state: FSMContext):
     kind = c.data.split(":")[2]
     if kind == "ids":
         await state.set_state(BcIds.ids)
-        return await show(c, f"{E('target')} Send the <b>user IDs</b> (separated by space, comma or new line):",
+        return await show(c, hd("target", "Broadcast by IDs") + "Send the <b>user IDs</b> <i>(separated by space, comma or new line)</i>:",
                           kb([B("Cancel", "close", "x_no")]))
     if kind not in AUDS:
         return await c.answer("Unknown audience", show_alert=True)
     await state.set_state(Broadcast.msg)
     await state.update_data(aud=kind, ids=[])
-    await show(c, f"{E('broadcast')} <b>Broadcast → {AUDS[kind]}</b> ({len(aud_ids(kind))} users)\n\n"
-                  "Send the message to deliver.\n"
-                  "<i>Text, photo, video, custom emoji - copied exactly as you send it.</i>",
+    await show(c, hd("broadcast", f"Broadcast → {AUDS[kind]}", f"{len(aud_ids(kind))} users")
+               + "Send the message to deliver.\n<i>Text, photo, video, custom emoji — copied exactly as you send it.</i>",
                kb([B("Cancel", "close", "x_no")]))
 
 
@@ -2259,7 +2326,7 @@ async def bc_ids(m: Message, state: FSMContext):
         return await m.answer("❗ No known user IDs found. Send again or /cancel")
     await state.set_state(Broadcast.msg)
     await state.update_data(aud="ids", ids=ids)
-    await m.answer(f"{E('broadcast')} <b>Broadcast → {len(ids)} selected users</b>\n\nNow send the message to deliver.",
+    await m.answer(hd("broadcast", f"Broadcast → {len(ids)} selected users") + "Now send the message to deliver.",
                    reply_markup=kb([B("Cancel", "close", "x_no")]))
 
 
@@ -2268,8 +2335,8 @@ async def bc_preview(m: Message, state: FSMContext):
     d = await state.get_data()
     n = len(aud_ids(d.get("aud", "all"), d.get("ids")))
     await state.update_data(chat=m.chat.id, mid=m.message_id)
-    await m.answer(f"{E('broadcast')} Ready to send to <b>{n}</b> users "
-                   f"(<i>{AUDS.get(d.get('aud', 'all'), 'Selected users')}</i>).\nPreview is the message above ☝️",
+    await m.answer(hd("broadcast", "Ready to send", AUDS.get(d.get("aud", "all"), "Selected users"))
+                   + f"Recipients: <b>{n}</b>\n<i>Preview is the message above ☝️</i>",
                    reply_markup=kb([B(f"Send to {n} users", "adm:bcgo", "x_ok", fb="📤")],
                                    [B("Cancel", "close", "x_no")]))
 
@@ -2281,7 +2348,7 @@ async def bc_go(c: CallbackQuery, state: FSMContext):
         return await c.answer("Nothing to send.", show_alert=True)
     await state.clear()
     users = aud_ids(d.get("aud", "all"), d.get("ids"))
-    await show(c, f"📤 Sending to {len(users)} users…")
+    await show(c, f"📤 <b>Sending to {len(users)} users…</b>")
     ok = fail = 0
     for uid in users:
         for _ in range(2):
@@ -2295,7 +2362,7 @@ async def bc_go(c: CallbackQuery, state: FSMContext):
                 fail += 1
                 break
         await asyncio.sleep(0.05)
-    await c.message.answer(f"{E('ok')} <b>Broadcast finished</b>\n\nDelivered: <b>{ok}</b>\nFailed: <b>{fail}</b>")
+    await c.message.answer(hd("ok", "Broadcast finished") + kv("ok", "Delivered", f"<b>{ok}</b>") + kv("no", "Failed", f"<b>{fail}</b>"))
 
 
 @admin.message(StateFilter(NoticeS.text))
@@ -2305,13 +2372,13 @@ async def notice_save(m: Message, state: FSMContext):
         await del_setting("notice")
         return await m.answer(f"{E('ok')} Notice cleared.")
     await set_setting("notice", m.html_text)
-    await m.answer(f"{E('ok')} Notice updated! (shown on /start)")
+    await m.answer(f"{E('ok')} Notice updated! <i>(shown on /start)</i>")
 
 
 # ── Settings ──
 SETTING_PROMPTS = {
     "support": "Send the <b>support username</b> (e.g. <code>@MySupport</code>). Send <code>clear</code> to remove.",
-    "payments": "Send payment methods - <b>one per line</b> as <code>Name|Details</code>:\n"
+    "payments": "Send payment methods — <b>one per line</b> as <code>Name|Details</code>:\n"
                 "<code>bKash|017XXXXXXXX (Send Money)\nNagad|017XXXXXXXX (Send Money)\nBinance Pay|XXXXXXXX</code>\n"
                 "<i>Any method whose name contains \"binance\" is auto-verified (when API keys are set). "
                 "bKash / Nagad / others → admin approval.</i>",
@@ -2330,16 +2397,23 @@ def onoff(key: str) -> str:
 
 async def screen_settings(ev):
     if not BINANCE_ON:
-        auto = "not configured (set BINANCE_API_KEY / SECRET)"
+        auto = "not configured"
     else:
         auto = onoff("auto_dep")
-    t = (f"{E('settings')} <b>Settings</b>\n{BAR}\nSupport: <b>{esc(SET.get('support') or '-')}</b>\n"
-         f"Min deposit: <b>{money(min_deposit())}</b>\nPayment methods: <b>{len(pay_methods())}</b>\n"
-         f"Binance auto-deposit: <b>{auto}</b>\nUSDT rate: <b>{money(usd_rate())}</b>\n"
-         f"Low-stock limit: <b>{low_threshold()}</b>\n"
-         f"Get Code link: <b>{esc(SET.get('code_url') or '-')}</b>\n"
-         f"Anti-spam: <b>{onoff('antispam')}</b>\n"
-         f"Maintenance: <b>{'ON 🔴' if flag('maintenance') else 'OFF 🟢'}</b>")
+    t = (hd("settings", "Settings", "Store configuration")
+         + sec("General")
+         + kv("notice", "Support", f"<b>{esc(SET.get('support') or '-')}</b>")
+         + kv("key", "Get Code link", f"<b>{esc(SET.get('code_url') or '-')}</b>")
+         + sec("Payments")
+         + kv("wallet", "Methods", f"<b>{len(pay_methods())}</b>")
+         + kv("money", "Min deposit", f"<b>{money(min_deposit())}</b>")
+         + kv("binance", "Binance auto", f"<b>{auto}</b>")
+         + kv("tag", "USDT rate", f"<b>{money(usd_rate())}</b>")
+         + sec("Protection")
+         + kv("low", "Low-stock limit", f"<b>{low_threshold()}</b>")
+         + kv("spam", "Anti-spam", f"<b>{onoff('antispam')}</b>")
+         + kv("settings", "Maintenance", f"<b>{'ON 🔴' if flag('maintenance') else 'OFF 🟢'}</b>")
+         + BAR)
     await show(ev, t, kb(
         [B("Support", "adm:sv:support", "x_edit", fb="💬"), B("Min Deposit", "adm:sv:min_dep", "x_edit", fb="💰")],
         [B("Payment Methods", "adm:sv:payments", "x_edit", fb="💳"), B("USDT Rate", "adm:sv:usd_rate", "x_edit", fb="💱")],
@@ -2358,8 +2432,8 @@ async def adm_bint(c: CallbackQuery):
         return await c.answer("BINANCE_API_KEY / SECRET not set.", show_alert=True)
     await c.answer("Testing…")
     ok, msg = await binance_test()
-    await c.message.answer(f"{E('binance')} <b>Binance API test</b>\n{BAR}\n"
-                           f"{E('ok') if ok else E('no')} <code>{esc(msg)}</code>\n\n"
+    await c.message.answer(hd("binance", "Binance API test")
+                           + f"{E('ok') if ok else E('no')} <code>{esc(msg)}</code>\n\n"
                            + ("" if ok else "<i>Check: key has “Enable Reading”, IP restriction (use Unrestricted or "
                                             "your server IP), and the server region is not blocked by Binance "
                                             "(try BINANCE_HOST=https://api1.binance.com).</i>"))
@@ -2387,7 +2461,7 @@ async def adm_sv(c: CallbackQuery, state: FSMContext):
         return await c.answer("Unknown", show_alert=True)
     await state.set_state(SetVal.value)
     await state.update_data(key=key)
-    await show(c, SETTING_PROMPTS[key], kb([B("Cancel", "adm:set", "x_no")]))
+    await show(c, hd("settings", "Edit setting") + SETTING_PROMPTS[key], kb([B("Cancel", "adm:set", "x_no")]))
 
 
 @admin.message(StateFilter(SetVal.value))
@@ -2416,8 +2490,8 @@ def sub_panel(uid: int):
     if not s:
         return None, None
     u = get_user(uid) or {}
-    t = (f"{E('shield')} <b>Sub Admin</b>\n{BAR}\n{E('profile')} {esc(u.get('full_name') or '-')} · <code>{uid}</code>\n\n"
-         "Tap to turn permissions on / off:\n<i>Colors, Custom Emoji and Sub Admins are owner-only.</i>")
+    t = (hd("shield", "Sub Admin", f"{esc(u.get('full_name') or '-')} · {uid}")
+         + "Tap to turn permissions on / off:\n<i>Colors, Custom Emoji and Sub Admins are owner-only.</i>")
     rows = []
     for k, label in PERMS.items():
         on = k in s.get("perms", [])
@@ -2436,8 +2510,8 @@ async def screen_subs(ev):
                        f"adm:sa:{s['id']}", "x_sub")])
     btns.append([B("Add Sub Admin", "adm:saadd", "x_add")])
     owners = ", ".join(f"<code>{i}</code>" for i in sorted(ADMIN_IDS)) or "-"
-    await show(ev, f"{E('shield')} <b>Sub Admins</b>\n\nOwners: {owners}\nSub admins: <b>{len(rows)}</b>\n"
-                   "<i>Sub admins get only the permissions you give them.</i>", kb(*btns))
+    await show(ev, hd("shield", "Sub Admins", "Give staff only the access they need")
+               + kv("crown", "Owners", owners) + kv("users", "Sub admins", f"<b>{len(rows)}</b>"), kb(*btns))
 
 
 @admin.callback_query(F.data == "adm:subs")
@@ -2449,8 +2523,9 @@ async def adm_subs(c: CallbackQuery, state: FSMContext):
 @admin.callback_query(F.data == "adm:saadd")
 async def adm_saadd(c: CallbackQuery, state: FSMContext):
     await state.set_state(SubAdd.uid)
-    await show(c, f"{E('shield')} Send the <b>user ID</b> or <b>@username</b> of the new sub admin.\n"
-                  "<i>The person must have started the bot at least once.</i>", kb([B("Cancel", "adm:subs", "x_no")]))
+    await show(c, hd("shield", "Add Sub Admin") + "Send the <b>user ID</b> or <b>@username</b>.\n"
+                                                  "<i>The person must have started the bot at least once.</i>",
+               kb([B("Cancel", "adm:subs", "x_no")]))
 
 
 @admin.message(StateFilter(SubAdd.uid))
@@ -2471,9 +2546,9 @@ async def sa_add(m: Message, state: FSMContext):
         await put("subs", uid)
     await state.clear()
     t, mk = sub_panel(uid)
-    await m.answer(f"{E('ok')} Sub admin added.\n\n{t}", reply_markup=mk)
+    await m.answer(f"{E('ok')} <b>Sub admin added.</b>\n\n{t}", reply_markup=mk)
     try:
-        await m.bot.send_message(uid, f"{E('shield')} <b>You are now a sub admin.</b>\nOpen the Admin Panel from the menu.",
+        await m.bot.send_message(uid, hd("shield", "You are now a sub admin") + "Open the <b>Admin Panel</b> from the menu.",
                                  reply_markup=user_menu_kb(uid))
     except Exception:
         pass
@@ -2508,7 +2583,7 @@ async def adm_sap(c: CallbackQuery):
 @admin.callback_query(F.data.startswith("adm:sadel:"))
 async def adm_sadel(c: CallbackQuery):
     uid = int(c.data.split(":")[2])
-    await show(c, "⚠️ <b>Remove this sub admin?</b>",
+    await show(c, hd("low", "Remove this sub admin?"),
                kb([B("Yes, remove", f"adm:sadelok:{uid}", "x_no", fb="🗑"), B("No", f"adm:sa:{uid}", "x_ok")]))
 
 
@@ -2530,8 +2605,8 @@ async def screen_styles(ev, page=0):
     nr = nav_row("adm:sty", page, pages)
     if nr:
         btns.append(nr)
-    await show(ev, f"🎨 <b>Button Colors</b>\n\nTap a button to change its color.\n"
-                   f"<i>🔵 Blue · 🟢 Green · 🔴 Red · ⚪ Default</i>", kb(*btns))
+    await show(ev, "🎨 <b>Button Colors</b>\n<i>🔵 Blue · 🟢 Green · 🔴 Red · ⚪ Default</i>\n"
+                   f"{BAR}\nTap a button to change its color 👇", kb(*btns))
 
 
 @admin.callback_query(F.data.startswith("adm:sty:"))
@@ -2541,7 +2616,8 @@ async def adm_sty(c: CallbackQuery):
 
 async def screen_style_pick(c: CallbackQuery, key: str):
     cur = bstyle(key)
-    t = (f"🎨 <b>{esc(BTN[key][0])}</b>\nCurrent: <b>{STYLE_LABEL.get(cur or 'none')}</b>\n\nChoose a color:")
+    t = (f"🎨 <b>{esc(BTN[key][0])}</b>\n{BAR}\n"
+         + kv("star", "Current", f"<b>{STYLE_LABEL.get(cur or 'none')}</b>") + "\nChoose a color:")
     rows = [[B(STYLE_LABEL[s], f"adm:sts:{key}:{s}", None, fb="") for s in ("primary", "success")],
             [B(STYLE_LABEL[s], f"adm:sts:{key}:{s}", None, fb="") for s in ("danger", "none")],
             [B("Reset to default", f"adm:sts:{key}:reset", "x_refresh")],
@@ -2588,8 +2664,8 @@ async def screen_emojis(ev, page=0):
     nr = nav_row("adm:emo", page, pages)
     if nr:
         btns.append(nr)
-    await show(ev, "⭐ <b>Custom Emoji</b>\n\nTap an item, then send ONE custom (premium) emoji.\n"
-                   "<i>⭐ = custom emoji is set</i>", kb(*btns))
+    await show(ev, hd("star", "Custom Emoji", "⭐ = custom emoji is set")
+               + "Tap an item, then send ONE custom (premium) emoji.\n<i>Works for buttons and for every icon inside texts.</i>", kb(*btns))
 
 
 @admin.callback_query(F.data.startswith("adm:emo:"))
@@ -2609,7 +2685,7 @@ def extract_emoji_id(m: Message):
 async def ask_emoji(c: CallbackQuery, state: FSMContext, back: str, **data):
     await state.set_state(EmojiS.value)
     await state.update_data(back=back, **data)
-    await show(c, "⭐ Send <b>ONE custom emoji</b> (or its numeric emoji ID).\nSend <code>clear</code> to remove it.",
+    await show(c, hd("star", "Set custom emoji") + "Send <b>ONE custom emoji</b> (or its numeric emoji ID).\nSend <code>clear</code> to remove it.",
                kb([B("Cancel", back, "x_no")]))
 
 
@@ -2664,7 +2740,6 @@ async def emoji_save(m: Message, state: FSMContext):
 try:
     from telethon import TelegramClient, errors as tgerr
     from telethon.sessions import StringSession
-    from telethon.tl.functions.account import GetPasswordRequest
 except ImportError:                      # telethon not installed -> feature disabled, bot still runs
     TelegramClient = None
     tgerr = None
@@ -2673,6 +2748,7 @@ TG_ON = bool(TG_API_ID and TG_API_HASH and TelegramClient)
 TG_PENDING: dict[int, dict] = {}         # admin_id -> login in progress {"client","phone","hash",...}
 TG_LOCKS: dict[int, asyncio.Lock] = {}   # one lock per stored account (never use a session twice at once)
 TG_COOL: dict[int, float] = {}           # user_id -> last "Get Login Code" time
+TG_WATCH: dict[int, asyncio.Task] = {}   # order_id -> background task waiting for the OTP
 CODE_RE = re.compile(r"(?:code|কোড)\D{0,12}(\d{5,6})", re.I)
 
 
@@ -2732,6 +2808,41 @@ async def tg_latest_code(acc: dict, since: float):
                 pass
 
 
+async def tg_wait_code(acc: dict, since: float, timeout: float = TG_WATCH_SECONDS, step: float = TG_WATCH_STEP):
+    """Keep ONE connection open and poll the service chat until a fresh login code arrives (or timeout).
+    Returns ('ok',(code,ts)) | ('none',None) | ('dead',None) | ('error',None)."""
+    lock = TG_LOCKS.setdefault(acc["id"], asyncio.Lock())
+    async with lock:
+        cl = tg_client(acc.get("session", ""))
+        try:
+            await cl.connect()
+            if not await cl.is_user_authorized():
+                return "dead", None
+            end = time.monotonic() + timeout
+            while time.monotonic() < end:
+                async for msg in cl.iter_messages(777000, limit=5):
+                    ts = msg.date.timestamp()
+                    if ts < since:
+                        break
+                    code = extract_code(msg.raw_text or "")
+                    if code:
+                        return "ok", (code, int(ts))
+                await asyncio.sleep(step)
+            return "none", None
+        except _dead_errors():
+            return "dead", None
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("tg_wait_code failed for #%s: %s", acc.get("id"), e)
+            return "error", None
+        finally:
+            try:
+                await cl.disconnect()
+            except Exception:
+                pass
+
+
 async def tg_check(acc: dict):
     """Returns (ok, text) - is the stored session still logged in?"""
     lock = TG_LOCKS.setdefault(acc["id"], asyncio.Lock())
@@ -2776,38 +2887,115 @@ async def tg_logout(acc: dict) -> bool:
                 pass
 
 
+# ── auto login-code watcher ──
+async def tg_stop_watch(oid: int):
+    t = TG_WATCH.pop(int(oid), None)
+    if t and not t.done():
+        t.cancel()
+        await asyncio.gather(t, return_exceptions=True)
+
+
+def tg_wait_block() -> str:
+    return (f"\n{E('radar')} <b>Listening for your code…</b>\n"
+            + quote("1️⃣ Open Telegram → <b>Add Account</b>\n"
+                    "2️⃣ Enter the number above and tap <b>Next</b>\n"
+                    "3️⃣ Your code appears here <b>automatically</b> ✨")
+            + f"\n<i>{E('clock')} Watching for up to {TG_WATCH_SECONDS // 60} minutes — no need to press anything.</i>")
+
+
+def tg_code_block(code: str, ts: int) -> str:
+    return (f"\n{E('mail')} <b>LOGIN CODE</b>\n<pre>{esc(code)}</pre>\n"
+            f"<i>{E('clock')} Received {fdate(ts)} — enter it in Telegram now.</i>")
+
+
+async def tg_watch(bot: Bot, chat_id: int, msg_id: int, oid: int, since: float):
+    o = D["orders"].get(str(oid))
+    a = D["tgacc"].get(str(o["tg_acc"])) if o else None
+    if not o or not a:
+        return
+
+    async def edit(text, markup):
+        try:
+            await bot.edit_message_text(text, chat_id=chat_id, message_id=msg_id, reply_markup=markup)
+        except TelegramBadRequest:
+            pass
+        except Exception as e:
+            log.warning("tg_watch edit failed: %s", e)
+
+    try:
+        st, res = await tg_wait_code(a, since)
+        if st == "ok":
+            code, ts = res
+            a["last_ts"] = ts
+            a["code_n"] = int(a.get("code_n", 0)) + 1
+            await put("tgacc", a["id"])
+            TG_WATCH.pop(oid, None)
+            await edit(tg_invoice(o, status=tg_code_block(code, ts)), tg_kb(o))
+            try:      # separate message = real push notification
+                await bot.send_message(
+                    chat_id, hd("mail", "Your login code", f"Order #{oid}") + f"<pre>{esc(code)}</pre>\n"
+                    f"<i>Enter it in Telegram now. If it asks for a password, use the TWO-STEP password from your order.</i>")
+            except Exception:
+                pass
+        elif st == "none":
+            TG_WATCH.pop(oid, None)
+            await edit(tg_invoice(o, status=f"\n⌛ <b>No code received.</b>\n<i>Start the login in Telegram, then tap "
+                                            f"<b>Get Login Code</b> again.</i>"), tg_kb(o))
+        elif st == "dead":
+            TG_WATCH.pop(oid, None)
+            await edit(tg_invoice(o, status=f"\n{E('no')} <b>This session is no longer active.</b>\n<i>Please contact support.</i>"),
+                       tg_kb(o))
+            await notify_admins(bot, hd("low", "TG session dead")
+                                + f"Account <code>{esc(a['phone'])}</code>\nOrder #{oid} · user <code>{o['user_id']}</code>", perm="tgacc")
+        else:
+            TG_WATCH.pop(oid, None)
+            await edit(tg_invoice(o, status=f"\n{E('low')} <b>Temporary error</b> while reading the code.\n<i>Please try again in a moment.</i>"),
+                       tg_kb(o))
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log.warning("tg_watch crashed: %s", e)
+    finally:
+        if TG_WATCH.get(oid) is asyncio.current_task():
+            TG_WATCH.pop(oid, None)
+
+
 # ── user side ──
 def tg_avail() -> list[dict]:
     return [a for a in D["tgacc"].values() if not a["sold"] and a.get("active", 1) and a.get("session")]
 
 
-def tg_invoice(o: dict, head=None) -> str:
+def tg_invoice(o: dict, head=None, status: str = "") -> str:
     a = D["tgacc"].get(str(o.get("tg_acc"))) or {}
     pw = a.get("twofa") or ""
     live = bool(a.get("session"))
     t = f"{head}\n\n" if head else ""
-    t += (f"{E('invoice')} <b>ORDER #{o['id']}</b>\n{BAR}\n"
-          f"{E('globe')} <b>Country:</b> {a.get('flag', '🌍')} {esc(a.get('cname', '-'))}\n"
-          f"{E('date')} <b>Date:</b> {fdate(o['created_at'])}\n"
-          f"{E('money')} <b>Paid:</b> {money(o['price'])}\n{BAR}\n"
-          f"┌── {E('phone')} <b>NUMBER</b>\n└ <code>{esc(a.get('phone', '-'))}</code>\n\n"
-          f"┌── {E('key')} <b>TWO-STEP password</b>\n└ <code>{esc(pw) if pw else 'No password'}</code>\n{BAR}\n")
-    if live:
-        t += ("<b>How to login</b>\n"
-              "1️⃣ Telegram → <b>Add Account</b> → enter the number above\n"
-              "2️⃣ Tap <b>Get Login Code</b> below — the code appears here\n"
-              "3️⃣ Enter the code in Telegram, then the TWO-STEP password if asked\n"
-              "4️⃣ When you are logged in, tap <b>Login Done</b>\n")
+    t += (hd("invoice", f"ORDER #{o['id']}", f"{a.get('flag', '🌍')} {esc(a.get('cname', '-'))} · {fdate(o['created_at'])}")
+          + kv("money", "Paid", f"<b>{money(o['price'])}</b>")
+          + f"\n{E('phone')} <b>NUMBER</b>\n<code>{esc(a.get('phone', '-'))}</code>\n"
+          + f"\n{E('key')} <b>TWO-STEP PASSWORD</b>\n<code>{esc(pw) if pw else 'No password'}</code>\n{BAR}\n")
+    if status:
+        t += status.lstrip("\n") + f"\n{BAR}\n"
+    elif live:
+        t += (sec("How to login")
+              + "1️⃣ Telegram → <b>Add Account</b> → enter the number\n"
+                "2️⃣ Tap <b>Get Login Code</b> below\n"
+                "3️⃣ The code is sent here <b>automatically</b>\n"
+                "4️⃣ Enter the code (+ password if asked)\n"
+                "5️⃣ When you are in, tap <b>Login Done</b>\n" + BAR + "\n")
     else:
-        t += f"{E('ok')} <i>Bot session removed — this account is now fully yours.</i>\n"
-    return t + f"{BAR}\n<i>Thank you for shopping with {esc(BRAND)}!</i>"
+        t += f"{E('ok')} <b>Bot session removed</b>\n<i>This account is now fully yours.</i>\n{BAR}\n"
+    return t + f"<i>Thank you for shopping with {esc(BRAND)} {EMOJI['spark']}</i>"
 
 
 def tg_kb(o: dict, back: bool = False):
     a = D["tgacc"].get(str(o.get("tg_acc"))) or {}
     rows = []
     if a.get("session"):
-        rows.append([B("Get Login Code", f"tgcode:{o['id']}", "tg_code")])
+        if o["id"] in TG_WATCH:
+            rows.append([B("Stop Waiting", f"tgstop:{o['id']}", "tg_stop")])
+        else:
+            rows.append([B("Get Login Code", f"tgcode:{o['id']}", "tg_code")])
         rows.append([B("Login Done", f"tgdone:{o['id']}", "tg_done")])
     rows.append([B("My Orders", "ords:0", "my_orders")] if not back else [B("Back", "ords:0", "back")])
     return kb(*rows)
@@ -2817,13 +3005,12 @@ async def screen_tgshop(ev):
     groups: dict[tuple, list] = {}
     for a in tg_avail():
         groups.setdefault((a.get("iso") or "XX", a.get("cname") or "Other"), []).append(a)
-    t = (f"{E('phone')} <b>Telegram Accounts</b>\n"
-         f"<i>Two-step password included · login code delivered right here</i>\n{BAR}\n")
+    t = hd("phone", "Telegram Accounts", "Two-step password included · code delivered right here")
     btns = []
     if not groups:
         t += "<i>No accounts in stock right now. Please check back soon.</i>"
     else:
-        t += "Choose a country 👇"
+        t += f"{len(tg_avail())} account(s) ready · choose a country 👇"
         for (iso, cn), lst in sorted(groups.items(), key=lambda x: x[0][1]):
             low = min(a["price"] for a in lst)
             btns.append([B(f"{cn} · {len(lst)} left · from {money(low)}", f"tgc:{iso}:0", "item",
@@ -2838,7 +3025,7 @@ async def screen_tgcountry(ev, iso: str, page: int = 0):
         return await screen_tgshop(ev)
     items, page, pages = paginate(lst, page, 8)
     fl, cn = lst[0]["flag"], lst[0]["cname"]
-    t = (f"{fl} <b>{esc(cn)}</b> accounts  <i>({len(lst)} in stock)</i>\n{BAR}\nPick a number 👇")
+    t = hd("globe", f"{fl} {esc(cn)}", f"{len(lst)} in stock") + "Pick a number 👇"
     btns = [[B(f"{mask_phone(a['phone'])} · {money(a['price'])}", f"tgb:{a['id']}", "item", fb=a["flag"])] for a in items]
     nr = nav_row(f"tgc:{iso}", page, pages)
     if nr:
@@ -2866,16 +3053,18 @@ async def cb_tgb(c: CallbackQuery):
         return await c.answer("This account is no longer available.", show_alert=True)
     back = B("Back", f"tgc:{a.get('iso') or 'XX'}:0", "back")
     if u["balance"] < a["price"]:
-        t = (f"{E('no')} <b>Insufficient balance</b>\n\nPrice: {money(a['price'])}\n"
-             f"Your balance: {money(u['balance'])}\n\nPlease add funds first.")
+        t = (hd("no", "Insufficient balance", "Top up to continue")
+             + kv("tag", "Price", money(a["price"]))
+             + kv("wallet", "Your balance", money(u["balance"]))
+             + kv("low", "Missing", f"<b>{money(a['price'] - u['balance'])}</b>"))
         return await show(c, t, kb([B("Add Funds", "dep", "deposit")], [back]))
-    t = (f"{E('cart')} <b>Confirm purchase</b>\n{BAR}\n"
-         f"{E('globe')} Country: <b>{a['flag']} {esc(a['cname'])}</b>\n"
-         f"{E('phone')} Number: <code>{mask_phone(a['phone'])}</code>\n"
-         f"{E('key')} Two-step password: <b>included</b>\n"
-         f"{E('money')} Price: <b>{money(a['price'])}</b>\n"
-         f"{E('wallet')} Balance after: <b>{money(u['balance'] - a['price'])}</b>\n{BAR}\n"
-         f"<i>The full number + password are shown right after payment.</i>")
+    t = (hd("cart", "Confirm purchase", "Please review your order")
+         + kv("globe", "Country", f"<b>{a['flag']} {esc(a['cname'])}</b>")
+         + kv("phone", "Number", f"<code>{mask_phone(a['phone'])}</code>")
+         + kv("key", "Two-step password", "<b>included</b>")
+         + kv("tag", "Price", f"<b>{money(a['price'])}</b>")
+         + kv("wallet", "Balance after", f"<b>{money(u['balance'] - a['price'])}</b>")
+         + ft("The full number + password are shown right after payment"))
     await show(c, t, kb([B("Confirm", f"tgok:{a['id']}", "confirm"), B("Cancel", f"tgc:{a.get('iso') or 'XX'}:0", "cancel")]))
 
 
@@ -2902,12 +3091,13 @@ async def cb_tgok(c: CallbackQuery):
         await put("users", uid)
         await put("orders", oid)
         await log_txn(uid, "purchase", -a["price"], f"#{oid} TG {a['flag']} {mask_phone(a['phone'])}", bal=u["balance"])
-    head = f"{E('party')} <b>Telegram account purchase successful, Now enjoy!</b> {E('ok')}"
+    head = f"{E('party')} <b>Telegram account purchased!</b> {E('ok')}\n<i>Now enjoy {EMOJI['spark']}</i>"
     await show(c, tg_invoice(o, head), tg_kb(o))
-    await notify_admins(c.bot, f"{E('phone')} <b>TG account sold · order #{oid}</b>\n"
-                               f"User: <code>{uid}</code> (@{esc(c.from_user.username or '-')})\n"
-                               f"{a['flag']} {esc(a['cname'])} · {esc(a['phone'])} · {money(a['price'])}\n"
-                               f"In stock now: <b>{len(tg_avail())}</b>", perm="tgacc")
+    await notify_admins(c.bot, hd("phone", f"TG account sold · order #{oid}")
+                        + kv("profile", "User", f"<code>{uid}</code> (@{esc(c.from_user.username or '-')})")
+                        + kv("globe", "Account", f"{a['flag']} {esc(a['cname'])} · {esc(a['phone'])}")
+                        + kv("money", "Price", f"<b>{money(a['price'])}</b>")
+                        + kv("stock", "In stock now", f"<b>{len(tg_avail())}</b>"), perm="tgacc")
 
 
 def _tg_order(c: CallbackQuery):
@@ -2919,36 +3109,35 @@ def _tg_order(c: CallbackQuery):
 
 @router.callback_query(F.data.startswith("tgcode:"))
 async def cb_tgcode(c: CallbackQuery):
+    """Start the AUTO watcher: the bot listens to the account and pushes the OTP the moment it arrives."""
     o, a = _tg_order(c)
     if not o or not a:
         return await c.answer("Order not found.", show_alert=True)
     if not a.get("session"):
         return await c.answer("Bot session was already removed.", show_alert=True)
+    if o["id"] in TG_WATCH:
+        return await c.answer("📡 Already listening — just start the login in Telegram.", show_alert=True)
     now = time.monotonic()
-    if now - TG_COOL.get(c.from_user.id, 0) < 6:
+    if now - TG_COOL.get(c.from_user.id, 0) < 4:
         return await c.answer("⏳ Wait a few seconds and try again.")
     TG_COOL[c.from_user.id] = now
     if int(a.get("code_n", 0)) >= TG_CODE_LIMIT:
-        return await c.answer("Code request limit reached. Please contact support.", show_alert=True)
-    await c.answer("🔎 Checking for your code…")
-    st, res = await tg_latest_code(a, o["created_at"] - 30)
-    stamp_t = f"\n<i>Checked {datetime.now().strftime('%H:%M:%S')}</i>"
-    if st == "ok":
-        code, ts = res
-        a["code_n"] = int(a.get("code_n", 0)) + 1
-        await put("tgacc", a["id"])
-        extra = (f"\n\n{E('mail')} <b>LOGIN CODE:</b> <code>{code}</code>\n"
-                 f"<i>Received {fdate(ts)} — enter it in Telegram now.</i>")
-    elif st == "none":
-        extra = ("\n\n⏳ <b>No code yet.</b>\nStart the login in Telegram first (enter the number and tap Next), "
-                 "then press <b>Get Login Code</b> again.")
-    elif st == "dead":
-        extra = "\n\n❌ <b>This session is no longer active.</b> Please contact support."
-        await notify_admins(c.bot, f"{E('low')} <b>TG session dead</b> — account <code>{esc(a['phone'])}</code> "
-                                   f"(order #{o['id']}, user <code>{o['user_id']}</code>)", perm="tgacc")
-    else:
-        extra = "\n\n⚠️ Temporary error while reading the code. Please try again in a moment."
-    await show(c, tg_invoice(o) + extra + stamp_t, tg_kb(o))
+        return await c.answer("Code limit reached. Please contact support.", show_alert=True)
+    since = max(time.time() - 20, float(a.get("last_ts", 0)) + 1)
+    TG_WATCH[o["id"]] = asyncio.create_task(
+        tg_watch(c.bot, c.message.chat.id, c.message.message_id, o["id"], since))
+    await c.answer("📡 Listening for your code…")
+    await show(c, tg_invoice(o, status=tg_wait_block()), tg_kb(o))
+
+
+@router.callback_query(F.data.startswith("tgstop:"))
+async def cb_tgstop(c: CallbackQuery):
+    o, a = _tg_order(c)
+    if not o or not a:
+        return await c.answer("Order not found.", show_alert=True)
+    await tg_stop_watch(o["id"])
+    await c.answer("Stopped.")
+    await show(c, tg_invoice(o), tg_kb(o))
 
 
 @router.callback_query(F.data.startswith("tgdone:"))
@@ -2958,9 +3147,10 @@ async def cb_tgdone(c: CallbackQuery):
         return await c.answer("Order not found.", show_alert=True)
     if not a.get("session"):
         return await c.answer("Already done ✅", show_alert=True)
-    await show(c, f"🔓 <b>Confirm: Login Done?</b>\n\nThe bot will remove its own session from this account.\n"
-                  f"{E('low')} After this you <b>cannot</b> get login codes here anymore, so only confirm when "
-                  f"you are logged in on your device.",
+    await show(c, hd("tg_done", "Confirm: Login Done?", "Final step")
+               + "The bot will remove its own session from this account.\n"
+               + quote(f"{E('low')} After this you <b>cannot</b> get login codes here anymore.\n"
+                       "Only confirm when you are logged in on your device.") + "\n",
                kb([B("Yes, I'm logged in", f"tgdoneok:{o['id']}", "confirm"), B("No", f"o:{o['id']}", "cancel")]))
 
 
@@ -2971,13 +3161,14 @@ async def cb_tgdoneok(c: CallbackQuery):
         return await c.answer("Order not found.", show_alert=True)
     if a.get("session"):
         await c.answer("Removing bot session…")
+        await tg_stop_watch(o["id"])          # release the session lock first
         if not await tg_logout(a):
-            return await show(c, tg_invoice(o) + f"\n\n{E('no')} Could not remove the session now. Try again shortly.",
+            return await show(c, tg_invoice(o, status=f"\n{E('no')} <b>Could not remove the session now.</b>\n<i>Try again shortly.</i>"),
                               tg_kb(o))
         a["session"], a["released"] = "", int(time.time())
         await put("tgacc", a["id"])
-        await notify_admins(c.bot, f"{E('ok')} Order #{o['id']}: buyer confirmed login, bot session removed "
-                                   f"({esc(a['phone'])}).", perm="tgacc")
+        await notify_admins(c.bot, hd("ok", f"Order #{o['id']} released")
+                            + f"Buyer confirmed login, bot session removed (<code>{esc(a['phone'])}</code>).", perm="tgacc")
     await show(c, tg_invoice(o), tg_kb(o))
 
 
@@ -2986,10 +3177,12 @@ async def screen_tgadmin(ev, page: int = 0):
     rows = sorted(D["tgacc"].values(), key=lambda a: -a["id"])
     items, page, pages = paginate(rows, page, 8)
     sold = sum(1 for a in rows if a["sold"])
-    t = (f"{E('phone')} <b>Telegram Accounts</b>\n{BAR}\n"
-         f"In stock: <b>{len(tg_avail())}</b> · Sold: <b>{sold}</b> · Total: <b>{len(rows)}</b>")
+    t = (hd("phone", "Telegram Accounts", "Sell logged-in accounts with auto code delivery")
+         + kv("ok", "In stock", f"<b>{len(tg_avail())}</b>")
+         + kv("cart", "Sold", f"<b>{sold}</b>")
+         + kv("stock", "Total", f"<b>{len(rows)}</b>"))
     if not TG_ON:
-        t += ("\n\n⚠️ <b>Adding is disabled.</b> Set <code>TG_API_ID</code> + <code>TG_API_HASH</code> "
+        t += ("\n⚠️ <b>Adding is disabled.</b> Set <code>TG_API_ID</code> + <code>TG_API_HASH</code> "
               "(my.telegram.org) and install <code>telethon</code>.")
     btns = [[B(f"{'🔴' if a['sold'] else '🟢'} {a['flag']} {a['phone']} · {money(a['price'])}",
                f"adm:tgv:{a['id']}", "x_item", fb="")] for a in items]
@@ -3023,14 +3216,13 @@ async def render_tg_account(c: CallbackQuery, aid: str):
         status = f"🔴 Sold to <code>{a.get('buyer')}</code> ({esc(b.get('full_name') or '-')}) · order #{a.get('order_id')}"
     else:
         status = "🟢 In stock" if a.get("active", 1) else "⚪ Hidden"
-    t = (f"{E('phone')} <b>#{a['id']} {a['flag']} {esc(a['cname'])}</b>\n{BAR}\n"
-         f"{E('phone')} Number: <code>{esc(a['phone'])}</code>\n"
-         f"{E('key')} 2FA: <code>{esc(a.get('twofa') or 'none')}</code>\n"
-         f"{E('money')} Price: <b>{money(a['price'])}</b>\n"
-         f"Status: {status}\n"
-         f"Bot session: <b>{'logged in ✅' if a.get('session') else 'removed'}</b>\n"
-         f"Code requests: <b>{int(a.get('code_n', 0))}</b>\n"
-         f"Added: {fdate(a.get('added_at', 0))}")
+    t = (hd("phone", f"#{a['id']} {a['flag']} {esc(a['cname'])}", f"Added {fdate(a.get('added_at', 0))}")
+         + kv("phone", "Number", f"<code>{esc(a['phone'])}</code>")
+         + kv("key", "2FA", f"<code>{esc(a.get('twofa') or 'none')}</code>")
+         + kv("tag", "Price", f"<b>{money(a['price'])}</b>")
+         + kv("bolt", "Status", status)
+         + kv("radar", "Bot session", f"<b>{'logged in ✅' if a.get('session') else 'removed'}</b>")
+         + kv("mail", "Codes delivered", f"<b>{int(a.get('code_n', 0))}</b>"))
     rows = []
     if a.get("session"):
         rows.append([B("Check Session", f"adm:tgchk:{aid}", "x_refresh"), B("Latest Code", f"adm:tgcode:{aid}", "x_edit", fb="📩")])
@@ -3063,7 +3255,8 @@ async def adm_tgcode(c: CallbackQuery):
     await c.answer("Reading…")
     st, res = await tg_latest_code(a, time.time() - 3600)
     if st == "ok":
-        txt = f"{E('mail')} <code>{esc(a['phone'])}</code> latest code (last 1h): <code>{res[0]}</code> · {fdate(res[1])}"
+        txt = (hd("mail", "Latest code", "last 1 hour") + f"<code>{esc(a['phone'])}</code>\n"
+               f"<pre>{res[0]}</pre><i>{fdate(res[1])}</i>")
     elif st == "none":
         txt = f"No login code in the last hour for <code>{esc(a['phone'])}</code>."
     else:
@@ -3075,7 +3268,7 @@ async def adm_tgcode(c: CallbackQuery):
 async def adm_tgp(c: CallbackQuery, state: FSMContext):
     await state.set_state(TgPrice.price)
     await state.update_data(aid=c.data.split(":")[2])
-    await show(c, "✏️ Send the <b>new price</b>:", kb([B("Cancel", "adm:tga:0", "x_no")]))
+    await show(c, hd("tag", "Edit Price") + "✏️ Send the <b>new price</b>:", kb([B("Cancel", "adm:tga:0", "x_no")]))
 
 
 @admin.message(StateFilter(TgPrice.price))
@@ -3104,7 +3297,7 @@ async def adm_tgd(c: CallbackQuery):
         return await c.answer("Not found", show_alert=True)
     note = ("The bot session will also be logged out from this account." if (a.get("session") and not a["sold"])
             else "Only the record is removed.")
-    await show(c, f"⚠️ <b>Delete {a['flag']} {esc(a['phone'])}?</b>\n<i>{note}</i>",
+    await show(c, hd("low", f"Delete {a['flag']} {esc(a['phone'])}?") + f"<i>{note}</i>",
                kb([B("Yes, delete", f"adm:tgdok:{aid}", "x_no", fb="🗑"), B("No", f"adm:tgv:{aid}", "x_ok")]))
 
 
@@ -3131,10 +3324,10 @@ async def adm_tgaadd(c: CallbackQuery, state: FSMContext):
     await tg_cleanup(c.from_user.id)
     await state.clear()
     await state.set_state(TgAdd.phone)
-    await show(c, f"{E('phone')} <b>Add Telegram Account</b>\n{BAR}\n"
-                  "Send the <b>phone number</b> with country code:\n<code>+8801XXXXXXXXX</code>\n\n"
-                  "<i>The bot will log in to this account and keep the session, so the buyer's login "
-                  "code can be shown inside the bot.</i>", CANCEL_TG())
+    await show(c, hd("phone", "Add Telegram Account", "Step 1 · phone number")
+               + "Send the <b>phone number</b> with country code:\n<code>+8801XXXXXXXXX</code>\n\n"
+                 "<i>The bot logs in to this account and keeps the session, so the buyer's login "
+                 "code can be delivered automatically inside the bot.</i>", CANCEL_TG())
 
 
 @admin.message(StateFilter(TgAdd.phone))
@@ -3146,7 +3339,7 @@ async def tg_phone(m: Message, state: FSMContext):
     if any(a["phone"] == phone for a in D["tgacc"].values()):
         return await m.answer("❗ This number is already in the list.")
     iso, cname = detect_country(phone)
-    wait = await m.answer(f"{E('pending')} Sending login code to <code>{phone}</code>…")
+    wait = await m.answer(f"{E('pending')} <b>Sending login code to</b> <code>{phone}</code>…")
     cl = tg_client()
     try:
         await cl.connect()
@@ -3172,10 +3365,11 @@ async def tg_phone(m: Message, state: FSMContext):
     how = {"SentCodeTypeApp": "the <b>Telegram app</b> (existing login)", "SentCodeTypeSms": "<b>SMS</b>",
            "SentCodeTypeCall": "a <b>phone call</b>", "SentCodeTypeFlashCall": "a flash call",
            "SentCodeTypeMissedCall": "a missed call"}.get(type(sent.type).__name__, "Telegram")
-    await wait.edit_text(f"{iso_flag(iso)} <b>{esc(cname)}</b> · <code>{phone}</code>\n{BAR}\n"
-                         f"{E('mail')} Login code sent via {how}.\n\n"
-                         f"Send the code <b>with dashes or spaces</b>, e.g. <code>1-2-3-4-5</code>\n"
-                         f"{E('low')} <i>If you send it as plain digits Telegram may cancel the code.</i>",
+    await wait.edit_text(hd("mail", "Code sent", f"Step 2 · {iso_flag(iso)} {esc(cname)}")
+                         + kv("phone", "Number", f"<code>{phone}</code>")
+                         + kv("mail", "Via", how)
+                         + f"\nSend the code <b>with dashes or spaces</b>, e.g. <code>1-2-3-4-5</code>\n"
+                           f"{E('low')} <i>If you send plain digits Telegram may cancel the code.</i>",
                          reply_markup=CANCEL_TG())
 
 
@@ -3192,8 +3386,9 @@ async def tg_code(m: Message, state: FSMContext):
         await p["client"].sign_in(p["phone"], code, phone_code_hash=p["hash"])
     except tgerr.SessionPasswordNeededError:
         await state.set_state(TgAdd.pwd)
-        return await m.answer(f"{E('key')} This account has <b>Two-Step Verification</b>.\n"
-                              "Send its <b>password</b> (your message will be deleted):", reply_markup=CANCEL_TG())
+        return await m.answer(hd("key", "Two-Step Verification", "Step 3 · password")
+                              + "This account has a password.\nSend it now <i>(your message will be deleted)</i>:",
+                              reply_markup=CANCEL_TG())
     except tgerr.PhoneCodeInvalidError:
         return await m.answer("❌ Wrong code. Send it again (e.g. <code>1-2-3-4-5</code>).")
     except tgerr.PhoneCodeExpiredError:
@@ -3249,14 +3444,13 @@ async def tg_after_login(m: Message, state: FSMContext, pw):
     if pw:
         p["twofa"] = pw
         await state.set_state(TgAdd.price)
-        return await m.answer(f"{E('ok')} <b>Logged in!</b> {esc(p['name'])}\n"
-                              f"{E('key')} 2FA password saved.\n\n{E('money')} Now send the <b>price</b> ({CURRENCY}):",
-                              reply_markup=CANCEL_TG())
+        return await m.answer(hd("ok", "Logged in!", esc(p["name"])) + f"{E('key')} 2FA password saved.\n\n"
+                              f"{E('money')} Now send the <b>price</b> ({CURRENCY}):", reply_markup=CANCEL_TG())
     await state.set_state(TgAdd.setpwd)
-    await m.answer(f"{E('ok')} <b>Logged in!</b> {esc(p['name'])}\n"
-                   f"{E('low')} This account has <b>no Two-Step password</b>.\n\n"
-                   f"{E('key')} Send a <b>new password</b> to set it now (min 4 chars), or send <code>skip</code> "
-                   f"to sell without 2FA.\n<i>(your message will be deleted)</i>", reply_markup=CANCEL_TG())
+    await m.answer(hd("ok", "Logged in!", esc(p["name"]))
+                   + f"{E('low')} This account has <b>no Two-Step password</b>.\n\n"
+                     f"{E('key')} Send a <b>new password</b> to set it now (min 4 chars), or send <code>skip</code> "
+                     f"to sell without 2FA.\n<i>(your message will be deleted)</i>", reply_markup=CANCEL_TG())
 
 
 @admin.message(StateFilter(TgAdd.setpwd))
@@ -3282,7 +3476,7 @@ async def tg_setpwd(m: Message, state: FSMContext):
                                   "Try another password or send <code>skip</code>.")
         p["twofa"] = txt
     await state.set_state(TgAdd.price)
-    await m.answer(f"{E('ok')} {'Password set.' if p['twofa'] else 'No 2FA.'}\n\n"
+    await m.answer(f"{E('ok')} <b>{'Password set.' if p['twofa'] else 'No 2FA.'}</b>\n\n"
                    f"{E('money')} Now send the <b>price</b> ({CURRENCY}):", reply_markup=CANCEL_TG())
 
 
@@ -3306,10 +3500,10 @@ async def tg_price(m: Message, state: FSMContext):
     await put("tgacc", aid)
     await tg_cleanup(m.from_user.id)          # disconnect only - the saved session stays valid
     await state.clear()
-    await m.answer(f"{E('ok')} <b>Account added!</b>\n{BAR}\n"
-                   f"{iso_flag(p['iso'])} {esc(p['cname'])} · <code>{esc(p['phone'])}</code>\n"
-                   f"{E('key')} 2FA: <code>{esc(p.get('twofa') or 'none')}</code>\n"
-                   f"{E('money')} Price: <b>{money(price)}</b>",
+    await m.answer(hd("ok", "Account added!", f"{iso_flag(p['iso'])} {esc(p['cname'])}")
+                   + kv("phone", "Number", f"<code>{esc(p['phone'])}</code>")
+                   + kv("key", "2FA", f"<code>{esc(p.get('twofa') or 'none')}</code>")
+                   + kv("tag", "Price", f"<b>{money(price)}</b>"),
                    reply_markup=kb([B("Add Another", "adm:tgaadd", "x_add"), B("Accounts", "adm:tga:0", "x_nav")]))
 
 
